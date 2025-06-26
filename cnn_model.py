@@ -157,7 +157,7 @@ def plot_psmc_comparison(model, test_samples, num_plots=5):
 if __name__ == '__main__':
     # --- 0. 配置 ---
     try:
-        num_threads = multiprocessing.cpu_count()
+        num_threads = multiprocessing.cpu_count()/2
         torch.set_num_threads(num_threads)
         print(f"PyTorch will use {num_threads} threads for computation.")
     except NotImplementedError:
