@@ -621,7 +621,9 @@ class DataSimulator:
                 time_point = random.randint(time_scale // 2, time_span)
                 size_factor = random.uniform(0.1, 5.0)
                 demographic_events.append(msprime.PopulationParametersChange(time=time_point, initial_size=Ne * size_factor, population_id=0))
-            demographic_events.sort(key=lambda x: x.time)
+        
+        # 修复：确保无论何种情况，返回前都对事件按时间排序，以满足msprime的要求。
+        demographic_events.sort(key=lambda x: x.time)
             
         return demographic_events, Ne
 
