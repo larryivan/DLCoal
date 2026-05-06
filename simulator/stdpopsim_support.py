@@ -5,13 +5,12 @@ from typing import Optional
 import numpy as np
 
 from .config import Config
-from .utils import piecewise_eval, time_grid
+from .utils import bin_average_log10_ne, time_grid
 
 
 def try_stdpopsim_sample(
     rng: np.random.Generator,
     cfg: Config,
-    split: str,
 ) -> Optional[tuple[object, np.ndarray, dict, object]]:
     if not cfg.enable_stdpopsim:
         return None
@@ -27,8 +26,9 @@ def try_stdpopsim_sample(
             model_ids = [m.id for m in species.demographic_models[: min(5, len(species.demographic_models))]]
         model_id = str(rng.choice(model_ids))
         model = species.get_demographic_model(model_id)
+        contig_length = cfg.stdpopsim_contig_length if cfg.stdpopsim_contig_length > 0 else cfg.seq_len
         contig = species.get_contig(
-            length=cfg.stdpopsim_contig_length,
+            length=contig_length,
             mutation_rate=cfg.baseline_mu,
             recombination_rate=cfg.baseline_rec,
         )
@@ -45,7 +45,7 @@ def try_stdpopsim_sample(
         except Exception:
             pass
 
-        _, mids = time_grid(cfg)
+        edges, _ = time_grid(cfg)
         breaks: list[float] = []
         values: list[float] = []
         dem = getattr(model, "model", None)
@@ -65,14 +65,17 @@ def try_stdpopsim_sample(
         if not values:
             values = [10_000.0]
 
-        y = np.log10(piecewise_eval(mids, breaks, values)).astype(np.float32)
+        y = bin_average_log10_ne(edges, breaks, values)
         meta = {
             "source_type": "stdpopsim_anchor",
+            "scenario": "stdpopsim",
             "demography_type": "stdpopsim",
             "stdpopsim_species": cfg.stdpopsim_species,
             "stdpopsim_model_id": model_id,
             "stdpopsim_population": pop_id,
+            "stdpopsim_contig_length": int(contig_length),
             "target_quality": "heuristic_single_population",
+            "target_aggregation": "log_time_bin_average",
             "demography_breaks": [float(x) for x in breaks],
             "demography_values": [float(x) for x in values],
         }

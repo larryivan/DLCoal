@@ -44,6 +44,7 @@ scratch/
 DLCoalSim-*/
 DLCoalSim_Out/
 DLCoalSim-Out/
+sim_dat/
 outputs/
 datasets/
 data/

@@ -5,16 +5,12 @@ import numpy as np
 from .config import Config
 
 
-def noise_params_for_split(rng: np.random.Generator, cfg: Config, split: str, source: str) -> dict:
-    if source == "clean_constant_map" and split not in {"val_ood_noise", "test_ood_noise"}:
-        return {"genotype_error": 0.0, "missing_rate": 0.0}
-    if split in {"val_ood_noise", "test_ood_noise"}:
-        ge = rng.uniform(cfg.ood_genotype_error_min, cfg.ood_genotype_error_max)
-        mr = rng.uniform(cfg.ood_missing_rate_min, cfg.ood_missing_rate_max)
-    else:
-        ge = rng.uniform(cfg.train_genotype_error_min, cfg.train_genotype_error_max)
-        mr = rng.uniform(cfg.train_missing_rate_min, cfg.train_missing_rate_max)
-    return {"genotype_error": float(ge), "missing_rate": float(mr)}
+def noise_params_for_sample(rng: np.random.Generator, cfg: Config, source: str) -> dict:
+    if source == "clean_constant_map":
+        return {"profile": "clean", "genotype_error": 0.0, "missing_rate": 0.0}
+    ge = rng.uniform(cfg.genotype_error_min, cfg.genotype_error_max)
+    mr = rng.uniform(cfg.missing_rate_min, cfg.missing_rate_max)
+    return {"profile": "mild", "genotype_error": float(ge), "missing_rate": float(mr)}
 
 
 def apply_genotype_noise(G: np.ndarray, rng: np.random.Generator, ge: float, mr: float) -> tuple[np.ndarray, np.ndarray]:

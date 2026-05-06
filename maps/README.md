@@ -20,3 +20,11 @@ Current maps:
 
 The simulator can still read older point-center or raw Roulette files for
 compatibility, but canonical map files should follow the interval format above.
+When using non-canonical maps, declare units explicitly:
+
+- recombination: `--recomb-map-unit per_bp` or `--recomb-map-unit cM_per_Mb`
+- mutation: `--mut-map-unit per_bp`, `--mut-map-unit relative`, or `--mut-map-unit roulette_raw`
+
+The simulator records `rate_unit_before`, `rate_unit_after`,
+`mean_rate_before_scaling`, `mean_rate_after_scaling`, and `scaling_method` in
+the dataset manifest and empirical-slice sample metadata.

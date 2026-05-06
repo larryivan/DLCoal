@@ -11,8 +11,8 @@ from .utils import time_grid
 
 README_TEMPLATE = """# {dataset_name}
 
-DLCoalSim is a minimally processed coalescent simulation benchmark for demographic
-history inference from whole-genome haplotype data.
+DLCoalSim is a minimally processed coalescent simulation dataset for demographic
+history inference from haplotype data.
 
 ## Core Philosophy
 
@@ -21,11 +21,23 @@ The dataset stores simulated observations, not model-specific feature engineerin
 - bit-packed haplotype genotypes
 - variant positions
 - observed recombination/mutation maps
-- target log10 Ne(t)
-- structured metadata and fixed splits
+- target log10 Ne(t), averaged within each logarithmic time bin
+- structured, reproducible sample metadata
 
 Handcrafted features such as SFS, LD, pi, and haplotype diversity are intentionally
 not precomputed in the core dataset.
+
+## Dataset Layout
+
+- `samples/shard_*.npz`: sample shards with ragged arrays encoded by offsets
+- `samples/shard_*.jsonl.gz`: full per-sample metadata aligned to each shard
+- `metadata/samples.csv`: flat metadata summary for filtering and benchmark recipes
+- `metadata/samples.jsonl.gz`: full metadata for all samples
+- `metadata/samples.parquet`: optional summary parquet when the local environment supports it
+- `config.json` and `manifest.json`: generation config and dataset manifest
+
+Targets are log-time bin averages, not midpoint samples. This keeps short
+events such as recent bottlenecks visible in labels when they overlap a time bin.
 
 ## Official Model Inputs
 
@@ -124,8 +136,12 @@ class DLCoalSimShard:
             M = np.unpackbits(missing, axis=1, bitorder="little")[:, :self.n_haplotypes].astype(np.uint8)
         else:
             G, M = packed, missing
+        seq = self.data["sequence_length"]
+        seq_len = int(seq[i] if len(seq) > 1 else seq[0])
         sample = {
             "sample_id": str(self.data["sample_id"][i]),
+            "sequence_length": seq_len,
+            "n_haplotypes": self.n_haplotypes,
             "positions_bp": pos,
             "genotypes": G,
             "missing_mask": M,
@@ -145,7 +161,7 @@ class DLCoalSimShard:
 '''
 
 
-def write_dataset_files(cfg: Config, split_manifests: dict[str, dict]) -> None:
+def write_dataset_files(cfg: Config, sample_manifest: dict) -> None:
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     edges, mids = time_grid(cfg)
@@ -159,7 +175,7 @@ def write_dataset_files(cfg: Config, split_manifests: dict[str, dict]) -> None:
     manifest = {
         "dataset_name": cfg.dataset_name,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "splits": split_manifests,
+        "samples": sample_manifest,
         "time_edges": edges.tolist(),
         "time_mids": mids.tolist(),
         "source_ids": SOURCE_IDS,
@@ -172,8 +188,3 @@ def write_dataset_files(cfg: Config, split_manifests: dict[str, dict]) -> None:
     scripts.mkdir(exist_ok=True)
     (scripts / "features.py").write_text(FEATURES_PY, encoding="utf-8")
     (scripts / "loader.py").write_text(LOADER_PY, encoding="utf-8")
-
-    split_dir = out / "splits"
-    split_dir.mkdir(exist_ok=True)
-    for split, man in split_manifests.items():
-        (split_dir / f"{split}.txt").write_text("\n".join(man.get("shards", [])) + "\n", encoding="utf-8")

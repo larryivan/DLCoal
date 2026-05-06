@@ -26,21 +26,6 @@ DEMO_IDS = {
 }
 ID_TO_DEMO = {v: k for k, v in DEMO_IDS.items()}
 
-SPLITS_DEFAULT = [
-    "train",
-    "val_id",
-    "val_recent",
-    "val_ood_demo",
-    "val_ood_map",
-    "val_ood_noise",
-    "test_id",
-    "test_ood_demo",
-    "test_ood_recent",
-    "test_ood_map",
-    "test_ood_noise",
-]
-
-
 @dataclass
 class Config:
     dataset_name: str = "DLCoalSim-Core-v0.1"
@@ -49,9 +34,7 @@ class Config:
     seed: int = 12345
     force: bool = False
 
-    n_train: int = 2000
-    n_val: int = 256
-    n_test: int = 512
+    n_samples: int = 2000
     shard_size: int = 64
     seq_len: int = 1_000_000
     n_haplotypes: int = 32
@@ -79,43 +62,35 @@ class Config:
 
     map_segments_min: int = 128
     map_segments_max: int = 512
-    observed_map_noise_train: float = 0.25
-    observed_map_noise_ood: float = 0.80
-    hotspot_missing_prob_train: float = 0.10
-    hotspot_missing_prob_ood: float = 0.35
+    observed_map_noise: float = 0.25
+    hotspot_missing_prob: float = 0.10
 
     recomb_map: str = ""
     mut_map: str = ""
+    recomb_map_unit: str = "per_bp"
+    mut_map_unit: str = "per_bp"
+    mut_map_scale_to_baseline: bool = True
 
-    train_genotype_error_min: float = 0.001
-    train_genotype_error_max: float = 0.004
-    train_missing_rate_min: float = 0.002
-    train_missing_rate_max: float = 0.020
-
-    ood_genotype_error_min: float = 0.006
-    ood_genotype_error_max: float = 0.020
-    ood_missing_rate_min: float = 0.030
-    ood_missing_rate_max: float = 0.150
+    genotype_error_min: float = 0.001
+    genotype_error_max: float = 0.004
+    missing_rate_min: float = 0.002
+    missing_rate_max: float = 0.020
 
     enable_stdpopsim: bool = False
     stdpopsim_species: str = "HomSap"
     stdpopsim_models: str = ""
-    stdpopsim_contig_length: int = 1_000_000
+    stdpopsim_contig_length: int = 0
 
     workers: int = 1
     compression: bool = True
     include_truth: bool = False
     max_retries: int = 3
 
-    splits: str = ",".join(SPLITS_DEFAULT)
-
 
 def apply_preset(cfg: Config) -> Config:
     if cfg.preset == "mini":
         cfg.dataset_name = "DLCoalSim-Mini"
-        cfg.n_train = 512
-        cfg.n_val = 96
-        cfg.n_test = 128
+        cfg.n_samples = 512
         cfg.shard_size = 32
         cfg.seq_len = 1_000_000
         cfg.n_haplotypes = 24
@@ -125,9 +100,7 @@ def apply_preset(cfg: Config) -> Config:
         cfg.p_stdpopsim_anchor = 0.0
     elif cfg.preset == "core_v01":
         cfg.dataset_name = "DLCoalSim-Core-v0.1"
-        cfg.n_train = 20_000
-        cfg.n_val = 2_000
-        cfg.n_test = 2_000
+        cfg.n_samples = 20_000
         cfg.shard_size = 128
         cfg.seq_len = 10_000_000
         cfg.n_haplotypes = 64
@@ -140,9 +113,7 @@ def apply_preset(cfg: Config) -> Config:
         cfg.p_stdpopsim_anchor = 0.0
     elif cfg.preset == "full_v01":
         cfg.dataset_name = "DLCoalSim-Full-v0.1"
-        cfg.n_train = 100_000
-        cfg.n_val = 5_000
-        cfg.n_test = 5_000
+        cfg.n_samples = 100_000
         cfg.shard_size = 128
         cfg.seq_len = 20_000_000
         cfg.n_haplotypes = 64
@@ -156,7 +127,3 @@ def apply_preset(cfg: Config) -> Config:
     else:
         raise ValueError(f"Unknown preset: {cfg.preset}")
     return cfg
-
-
-def split_names(cfg: Config) -> list[str]:
-    return [s.strip() for s in cfg.splits.split(",") if s.strip()]

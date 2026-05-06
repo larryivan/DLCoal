@@ -178,6 +178,7 @@ maps = load_empirical_rate_table(
     "palsson_2025_autosomes_hg38.bed",
     baseline_rate=1e-8,
     map_kind="recombination",
+    rate_unit="per_bp",
 )
 
 rng = rng_from_seed(123)

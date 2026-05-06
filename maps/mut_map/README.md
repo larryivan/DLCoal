@@ -230,6 +230,7 @@ maps = load_empirical_rate_table(
     "roulette_2023_autosomes_hg38_1000bp.bed",
     baseline_rate=1.25e-8,
     map_kind="mutation",
+    rate_unit="per_bp",
 )
 
 rng = rng_from_seed(123)

@@ -32,15 +32,12 @@ def make_rate_map(pos: np.ndarray, rates: np.ndarray) -> msprime.RateMap:
     return msprime.RateMap(position=pos, rate=rates)
 
 
-def _segment_range(cfg: Config, is_mut: bool, ood: bool) -> tuple[int, int]:
+def _segment_range(cfg: Config, is_mut: bool) -> tuple[int, int]:
     lo = max(1, cfg.map_segments_min)
     hi = max(lo, cfg.map_segments_max)
     if is_mut:
         lo = max(16, lo // 2)
         hi = max(lo, hi // 2)
-    if ood:
-        lo *= 2
-        hi *= 2
     return lo, hi
 
 
@@ -49,63 +46,56 @@ def synthetic_heterogeneous_map(
     cfg: Config,
     baseline: float,
     is_mut: bool,
-    ood: bool,
     obs_noise_sigma: float,
     hotspot_missing_prob: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     length = cfg.seq_len
-    seg_min, seg_max = _segment_range(cfg, is_mut, ood)
+    seg_min, seg_max = _segment_range(cfg, is_mut)
     n_segments = int(rng.integers(seg_min, seg_max + 1))
     internal = np.sort(rng.uniform(0, length, size=n_segments - 1))
     pos = np.unique(np.concatenate([[0.0], internal, [float(length)]])).astype(np.float64)
     n = len(pos) - 1
 
     broad_sd = 0.25 if is_mut else 0.55
-    if ood:
-        broad_sd *= 1.8
     rw = np.cumsum(rng.normal(0, broad_sd, size=n))
     rw = (rw - rw.mean()) / (rw.std() + 1e-8)
     rates = baseline * np.exp((0.25 if is_mut else 0.55) * rw)
 
     if is_mut:
-        n_hot = int(rng.integers(1, 5 if not ood else 10))
-        hot_factor = (2, 12 if not ood else 25)
+        n_hot = int(rng.integers(1, 5))
+        hot_factor = (2, 12)
     else:
-        n_hot = int(rng.integers(3, 16 if not ood else 40))
-        hot_factor = (5, 80 if not ood else 200)
+        n_hot = int(rng.integers(3, 16))
+        hot_factor = (5, 80)
     for _ in range(n_hot):
         c = int(rng.integers(0, n))
-        width = int(rng.integers(1, 4 if not ood else 8))
+        width = int(rng.integers(1, 4))
         rates[max(0, c - width) : min(n, c + width + 1)] *= rng.uniform(*hot_factor)
 
-    n_cold = int(rng.integers(0, 4 if not ood else 10))
+    n_cold = int(rng.integers(0, 4))
     for _ in range(n_cold):
         c = int(rng.integers(0, n))
-        width = int(rng.integers(2, 16 if not ood else 40))
+        width = int(rng.integers(2, 16))
         rates[max(0, c - width) : min(n, c + width + 1)] *= rng.uniform(0.01, 0.3)
 
     rates = rates * (baseline / (rates.mean() + 1e-30))
-    rates = np.clip(rates, baseline * 1e-5, baseline * (500 if ood else 200))
+    rates = np.clip(rates, baseline * 1e-5, baseline * 200)
 
     obs = rates * rng.lognormal(0, obs_noise_sigma, size=rates.shape)
     if hotspot_missing_prob > 0:
         high = obs > np.quantile(obs, 0.95)
         miss = high & (rng.random(obs.shape) < hotspot_missing_prob)
         obs[miss] = baseline * rng.uniform(0.5, 2.0, size=miss.sum())
-    obs = np.clip(obs, baseline * 1e-6, baseline * (1000 if ood else 500))
+    obs = np.clip(obs, baseline * 1e-6, baseline * 500)
     meta = {
         "synthetic_map_segments": int(n),
         "map_is_mutation": bool(is_mut),
-        "map_ood": bool(ood),
         "observed_noise_sigma": float(obs_noise_sigma),
     }
     return pos, rates.astype(np.float64), pos.copy(), obs.astype(np.float64), meta
 
 
-def choose_source(rng: np.random.Generator, cfg: Config, split: str, empirical_available: bool) -> str:
-    if split in {"val_ood_map", "test_ood_map", "val_ood_noise", "test_ood_noise"}:
-        return "custom_heterogeneous"
-
+def choose_source(rng: np.random.Generator, cfg: Config, empirical_available: bool) -> str:
     probs = {
         "clean_constant_map": cfg.p_clean_constant,
         "random_global_mu_r": cfg.p_random_global,
@@ -125,12 +115,10 @@ def sample_maps_for_source(
     rng: np.random.Generator,
     cfg: Config,
     source: str,
-    split: str,
     empirical: EmpiricalMapStore,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
-    is_ood_map = split in {"val_ood_map", "test_ood_map"}
-    obs_noise = cfg.observed_map_noise_ood if is_ood_map else cfg.observed_map_noise_train
-    miss_prob = cfg.hotspot_missing_prob_ood if is_ood_map else cfg.hotspot_missing_prob_train
+    obs_noise = cfg.observed_map_noise
+    miss_prob = cfg.hotspot_missing_prob
 
     meta: dict = {"source_type": source}
     if source == "clean_constant_map":
@@ -138,7 +126,14 @@ def sample_maps_for_source(
         mut_pos, mut_rate = constant_map(cfg.seq_len, cfg.baseline_mu)
         obs_rec_pos, obs_rec_rate = rec_pos.copy(), rec_rate.copy()
         obs_mut_pos, obs_mut_rate = mut_pos.copy(), mut_rate.copy()
-        meta.update({"map_type": "constant_clean", "global_rec_rate": cfg.baseline_rec, "global_mu_rate": cfg.baseline_mu})
+        meta.update({
+            "map_type": "constant_clean",
+            "map_mode": "constant_clean",
+            "recomb_mode": "constant",
+            "mu_mode": "constant",
+            "global_rec_rate": cfg.baseline_rec,
+            "global_mu_rate": cfg.baseline_mu,
+        })
     elif source == "random_global_mu_r":
         rec = cfg.baseline_rec * loguniform(rng, 0.3, 3.0)
         mu = cfg.baseline_mu * loguniform(rng, 0.5, 2.0)
@@ -146,7 +141,14 @@ def sample_maps_for_source(
         mut_pos, mut_rate = constant_map(cfg.seq_len, mu)
         obs_rec_pos, obs_rec_rate = rec_pos.copy(), rec_rate.copy()
         obs_mut_pos, obs_mut_rate = mut_pos.copy(), mut_rate.copy()
-        meta.update({"map_type": "constant_random_global", "global_rec_rate": rec, "global_mu_rate": mu})
+        meta.update({
+            "map_type": "constant_random_global",
+            "map_mode": "constant_random_global",
+            "recomb_mode": "constant_random_global",
+            "mu_mode": "constant_random_global",
+            "global_rec_rate": rec,
+            "global_mu_rate": mu,
+        })
     elif source == "empirical_map_slice" and empirical.is_available(cfg.seq_len):
         chrom = str(rng.choice(empirical.common_chroms(cfg.seq_len)))
         rec_pos, rec_rate, obs_rec_pos, obs_rec_rate, rec_meta = slice_piecewise_map(
@@ -155,15 +157,31 @@ def sample_maps_for_source(
         mut_pos, mut_rate, obs_mut_pos, obs_mut_rate, mut_meta = slice_piecewise_map(
             rng, empirical.mut_maps[chrom], cfg.seq_len, obs_noise * 0.6, cfg.baseline_mu
         )
-        meta.update({"map_type": "empirical_slice", "observed_noise_sigma": obs_noise, "rec_slice": rec_meta, "mut_slice": mut_meta})
+        meta.update({
+            "map_type": "empirical_slice",
+            "map_mode": "empirical_slice",
+            "recomb_mode": "empirical_slice",
+            "mu_mode": "empirical_slice",
+            "observed_noise_sigma": obs_noise,
+            "rec_slice": rec_meta,
+            "mut_slice": mut_meta,
+        })
     else:
         source = "custom_heterogeneous"
         rec_pos, rec_rate, obs_rec_pos, obs_rec_rate, rec_meta = synthetic_heterogeneous_map(
-            rng, cfg, cfg.baseline_rec, is_mut=False, ood=is_ood_map, obs_noise_sigma=obs_noise, hotspot_missing_prob=miss_prob
+            rng, cfg, cfg.baseline_rec, is_mut=False, obs_noise_sigma=obs_noise, hotspot_missing_prob=miss_prob
         )
         mut_pos, mut_rate, obs_mut_pos, obs_mut_rate, mut_meta = synthetic_heterogeneous_map(
-            rng, cfg, cfg.baseline_mu, is_mut=True, ood=is_ood_map, obs_noise_sigma=obs_noise * 0.6, hotspot_missing_prob=miss_prob * 0.5
+            rng, cfg, cfg.baseline_mu, is_mut=True, obs_noise_sigma=obs_noise * 0.6, hotspot_missing_prob=miss_prob * 0.5
         )
-        meta.update({"source_type": source, "map_type": "synthetic_heterogeneous", "rec_map_meta": rec_meta, "mut_map_meta": mut_meta})
+        meta.update({
+            "source_type": source,
+            "map_type": "synthetic_heterogeneous",
+            "map_mode": "synthetic_heterogeneous",
+            "recomb_mode": "synthetic_heterogeneous",
+            "mu_mode": "synthetic_heterogeneous",
+            "rec_map_meta": rec_meta,
+            "mut_map_meta": mut_meta,
+        })
 
     return rec_pos, rec_rate, obs_rec_pos, obs_rec_rate, mut_pos, mut_rate, obs_mut_pos, obs_mut_rate, meta

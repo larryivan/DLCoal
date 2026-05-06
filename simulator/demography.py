@@ -6,7 +6,7 @@ import msprime
 import numpy as np
 
 from .config import Config
-from .utils import loguniform, piecewise_eval, time_grid
+from .utils import bin_average_log10_ne, loguniform, time_grid
 
 
 def build_demography(breaks: Sequence[float], values: Sequence[float]) -> msprime.Demography:
@@ -18,14 +18,7 @@ def build_demography(breaks: Sequence[float], values: Sequence[float]) -> msprim
     return dem
 
 
-def choose_demo_type(rng: np.random.Generator, cfg: Config, split: str) -> str:
-    if split in {"val_recent", "test_ood_recent"}:
-        return "recent_bottleneck"
-    if split in {"val_ood_demo", "test_ood_demo"}:
-        choices = ["single_bottleneck", "recent_bottleneck", "zigzag", "ancient_event", "three_epoch"]
-        probs = np.array([0.25, 0.25, 0.20, 0.15, 0.15])
-        return str(rng.choice(choices, p=probs / probs.sum()))
-
+def choose_demo_type(rng: np.random.Generator, cfg: Config) -> str:
     choices = [
         "smooth_random_walk",
         "single_bottleneck",
@@ -52,10 +45,10 @@ def choose_demo_type(rng: np.random.Generator, cfg: Config, split: str) -> str:
     return str(rng.choice(choices, p=probs / probs.sum()))
 
 
-def sample_custom_demography(rng: np.random.Generator, cfg: Config, split: str) -> tuple[msprime.Demography, np.ndarray, dict]:
-    _, mids = time_grid(cfg)
-    t_max = float(mids[-1])
-    demo_type = choose_demo_type(rng, cfg, split)
+def sample_custom_demography(rng: np.random.Generator, cfg: Config) -> tuple[msprime.Demography, np.ndarray, dict]:
+    edges, mids = time_grid(cfg)
+    t_max = float(edges[-1])
+    demo_type = choose_demo_type(rng, cfg)
 
     if demo_type == "smooth_random_walk":
         logn = rng.uniform(3.6, 5.2)
@@ -108,15 +101,13 @@ def sample_custom_demography(rng: np.random.Generator, cfg: Config, split: str) 
         breaks = [t1, t2]
         values = [n0, float(n1), float(n2)]
     elif demo_type == "zigzag":
-        high_k = 10 if split in {"val_ood_demo", "test_ood_demo"} else 8
-        k = int(rng.integers(4, high_k))
+        k = int(rng.integers(4, 8))
         breaks = sorted(list(np.exp(rng.uniform(np.log(200), np.log(t_max * 0.8), size=k))))
         n = loguniform(rng, 3_000, 120_000)
         values = [n]
         sign = 1
         for _ in breaks:
-            hi = 12.0 if split in {"val_ood_demo", "test_ood_demo"} else 7.0
-            factor = loguniform(rng, 1.5, hi)
+            factor = loguniform(rng, 1.5, 7.0)
             n = n * factor if sign > 0 else n / factor
             n = float(np.clip(n, 200, 500_000))
             values.append(n)
@@ -131,11 +122,13 @@ def sample_custom_demography(rng: np.random.Generator, cfg: Config, split: str) 
         values = [n0]
         demo_type = "constant"
 
-    y = np.log10(piecewise_eval(mids, breaks, values)).astype(np.float32)
+    y = bin_average_log10_ne(edges, breaks, values)
     meta = {
+        "scenario": demo_type,
         "demography_type": demo_type,
         "demography_breaks": [float(x) for x in breaks],
         "demography_values": [float(x) for x in values],
         "target_scale": "log10_Ne",
+        "target_aggregation": "log_time_bin_average",
     }
     return build_demography(breaks, values), y, meta

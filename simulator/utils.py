@@ -32,6 +32,48 @@ def piecewise_eval(times: np.ndarray, breaks: Sequence[float], values: Sequence[
     return out
 
 
+def bin_average_log10_ne(
+    edges: np.ndarray,
+    breaks: Sequence[float],
+    values: Sequence[float],
+) -> np.ndarray:
+    """Average piecewise-constant log10 Ne over each logarithmic time bin.
+
+    The bins are logarithmic, so the average is taken uniformly in log time.
+    Breakpoints inside a bin are included explicitly, which prevents short
+    bottlenecks from disappearing just because they miss a bin midpoint.
+    """
+    edges = np.asarray(edges, dtype=np.float64)
+    if np.any(edges <= 0) or np.any(np.diff(edges) <= 0):
+        raise ValueError("time edges must be positive and strictly increasing")
+
+    pairs = sorted(
+        (float(b), float(v))
+        for b, v in zip(breaks, values[1:])
+        if np.isfinite(b) and b > 0 and np.isfinite(v)
+    )
+    cleaned_breaks = [b for b, _ in pairs]
+    cleaned_values = [float(values[0]), *(v for _, v in pairs)]
+    out: list[float] = []
+    for left, right in zip(edges[:-1], edges[1:]):
+        cuts = [float(left)]
+        cuts.extend(b for b in cleaned_breaks if left < b < right)
+        cuts.append(float(right))
+
+        total = 0.0
+        weight_sum = 0.0
+        for a, b in zip(cuts[:-1], cuts[1:]):
+            if b <= a:
+                continue
+            probe = float(np.sqrt(a * b))
+            ne = float(piecewise_eval(np.array([probe], dtype=np.float64), cleaned_breaks, cleaned_values)[0])
+            weight = float(np.log(b) - np.log(a))
+            total += weight * float(np.log10(max(ne, 1.0)))
+            weight_sum += weight
+        out.append(total / weight_sum if weight_sum else float("nan"))
+    return np.asarray(out, dtype=np.float32)
+
+
 def loguniform(rng: np.random.Generator, lo: float, hi: float) -> float:
     return float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
 

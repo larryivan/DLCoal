@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from .config import Config, split_names
+from .config import Config
 from .empirical_maps import EmpiricalMapStore
 from .sample import simulate_one_with_retries
 from .utils import resolve_workers, safe_json_dumps
@@ -62,7 +62,7 @@ def write_shard(samples: list[dict], out_path: Path, cfg: Config) -> None:
         missing_packed=missing,
         packed_hap_bytes=np.array([packed_bytes], dtype=np.int16),
         n_haplotypes=np.array([cfg.n_haplotypes], dtype=np.int16),
-        sequence_length=np.array([cfg.seq_len], dtype=np.int64),
+        sequence_length=np.array([s["metadata"]["sequence_length"] for s in samples], dtype=np.int64),
         obs_rec_pos=obs_rec_pos,
         obs_rec_pos_offsets=obs_rec_pos_offsets,
         obs_rec_rate=obs_rec_rate,
@@ -98,47 +98,89 @@ def write_shard(samples: list[dict], out_path: Path, cfg: Config) -> None:
             f.write(safe_json_dumps(s["metadata"]) + "\n")
 
 
-def n_for_split(cfg: Config, split: str) -> int:
-    if split == "train":
-        return cfg.n_train
-    if split.startswith("test"):
-        return cfg.n_test
-    return cfg.n_val
-
-
-def split_seed_base(cfg: Config, split: str) -> int:
-    return cfg.seed + 1_000_000 * (split_names(cfg).index(split) + 1)
-
-
 def _empirical_to_dict(empirical: EmpiricalMapStore) -> dict:
     return {"rec_maps": empirical.rec_maps, "mut_maps": empirical.mut_maps}
 
 
-def generate_split(cfg: Config, split: str, empirical: EmpiricalMapStore) -> dict:
-    n = n_for_split(cfg, split)
-    split_dir = Path(cfg.out_dir) / "shards" / split
-    split_dir.mkdir(parents=True, exist_ok=True)
-    done = split_dir / "DONE.json"
+def _metadata_row(meta: dict) -> dict:
+    rec_slice = meta.get("rec_slice", {})
+    mut_slice = meta.get("mut_slice", {})
+    return {
+        "sample_id": meta["sample_id"],
+        "sample_index": meta.get("sample_index", 0),
+        "source_type": meta.get("source_type", ""),
+        "scenario": meta.get("scenario", ""),
+        "demography_type": meta.get("demography_type", ""),
+        "map_type": meta.get("map_type", ""),
+        "map_mode": meta.get("map_mode", ""),
+        "recomb_mode": meta.get("recomb_mode", ""),
+        "mu_mode": meta.get("mu_mode", ""),
+        "noise_profile": meta.get("noise_profile", ""),
+        "n_variants": meta.get("n_variants", 0),
+        "num_trees": meta.get("num_trees", 0),
+        "num_sites": meta.get("num_sites", 0),
+        "sequence_length": meta.get("sequence_length", 0),
+        "n_haplotypes": meta.get("n_haplotypes", 0),
+        "seed": meta.get("seed", 0),
+        "recomb_rate_unit_before": rec_slice.get("rate_unit_before", ""),
+        "recomb_rate_unit_after": rec_slice.get("rate_unit_after", ""),
+        "recomb_scaling_method": rec_slice.get("scaling_method", ""),
+        "mu_rate_unit_before": mut_slice.get("rate_unit_before", ""),
+        "mu_rate_unit_after": mut_slice.get("rate_unit_after", ""),
+        "mu_scaling_method": mut_slice.get("scaling_method", ""),
+    }
+
+
+def _write_metadata(metadata_rows: list[dict], full_metadata: list[dict], out_dir: Path) -> dict:
+    meta_dir = out_dir / "metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(metadata_rows)
+    df.to_csv(meta_dir / "samples.csv", index=False)
+    paths = {
+        "summary_csv": "metadata/samples.csv",
+        "full_jsonl_gz": "metadata/samples.jsonl.gz",
+    }
+    try:
+        df.to_parquet(meta_dir / "samples.parquet", index=False)
+        paths["summary_parquet"] = "metadata/samples.parquet"
+    except Exception:
+        pass
+    with gzip.open(meta_dir / "samples.jsonl.gz", "wt", encoding="utf-8") as f:
+        for meta in full_metadata:
+            f.write(safe_json_dumps(meta) + "\n")
+    return paths
+
+
+def generate_dataset(cfg: Config, empirical: EmpiricalMapStore) -> dict:
+    n = cfg.n_samples
+    out_dir = Path(cfg.out_dir)
+    samples_dir = out_dir / "samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    done = samples_dir / "DONE.json"
     if done.exists() and not cfg.force:
-        print(f"[skip] {split}: DONE exists ({done})")
+        print(f"[skip] samples: DONE exists ({done})")
         return json.loads(done.read_text())
     if cfg.force:
-        for f in split_dir.glob("*"):
-            if f.is_file():
-                f.unlink()
+        for directory in [samples_dir, out_dir / "metadata"]:
+            if directory.exists():
+                for f in directory.glob("*"):
+                    if f.is_file():
+                        f.unlink()
 
-    print(f"[generate] split={split} n={n} shard_size={cfg.shard_size}")
+    print(f"[generate] samples n={n} shard_size={cfg.shard_size}")
     cfg_dict = dataclasses.asdict(cfg)
     empirical_dict = _empirical_to_dict(empirical)
-    seeds = [split_seed_base(cfg, split) + i * 7919 for i in range(n)]
-    tasks = [(i, split, cfg_dict, empirical_dict, seeds[i]) for i in range(n)]
+    seeds = [cfg.seed + i * 7919 for i in range(n)]
+    tasks = [(i, cfg_dict, empirical_dict, seeds[i]) for i in range(n)]
 
     workers = resolve_workers(cfg.workers)
     samples_buffer: list[dict] = []
     shard_paths: list[str] = []
     metadata_rows: list[dict] = []
+    full_metadata: list[dict] = []
     source_counts: dict[str, int] = {}
     demo_counts: dict[str, int] = {}
+    map_counts: dict[str, int] = {}
 
     def handle_sample(sample: dict) -> None:
         nonlocal samples_buffer
@@ -146,25 +188,15 @@ def generate_split(cfg: Config, split: str, empirical: EmpiricalMapStore) -> dic
         meta = sample["metadata"]
         source = meta.get("source_type", "unknown")
         demo = meta.get("demography_type", "unknown")
+        map_mode = meta.get("map_mode", meta.get("map_type", "unknown"))
         source_counts[source] = source_counts.get(source, 0) + 1
         demo_counts[demo] = demo_counts.get(demo, 0) + 1
-        metadata_rows.append(
-            {
-                "sample_id": meta["sample_id"],
-                "sample_index": meta.get("sample_index", 0),
-                "split": meta["split"],
-                "source_type": source,
-                "demography_type": demo,
-                "map_type": meta.get("map_type", ""),
-                "n_variants": meta.get("n_variants", 0),
-                "num_trees": meta.get("num_trees", 0),
-                "num_sites": meta.get("num_sites", 0),
-                "seed": meta.get("seed", 0),
-            }
-        )
+        map_counts[map_mode] = map_counts.get(map_mode, 0) + 1
+        metadata_rows.append(_metadata_row(meta))
+        full_metadata.append(meta)
         if len(samples_buffer) >= cfg.shard_size:
             shard_idx = len(shard_paths)
-            path = split_dir / f"{split}_{shard_idx:05d}.npz"
+            path = samples_dir / f"shard_{shard_idx:05d}.npz"
             write_shard(samples_buffer, path, cfg)
             shard_paths.append(str(path.relative_to(cfg.out_dir)))
             samples_buffer = []
@@ -174,7 +206,7 @@ def generate_split(cfg: Config, split: str, empirical: EmpiricalMapStore) -> dic
         next_to_write = 0
         with ProcessPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(simulate_one_with_retries, t): t[0] for t in tasks}
-            for fut in tqdm(as_completed(futures), total=n, desc=f"simulate {split}"):
+            for fut in tqdm(as_completed(futures), total=n, desc="simulate samples"):
                 sample = fut.result()
                 idx = int(sample["metadata"]["sample_index"])
                 pending[idx] = sample
@@ -182,29 +214,30 @@ def generate_split(cfg: Config, split: str, empirical: EmpiricalMapStore) -> dic
                     handle_sample(pending.pop(next_to_write))
                     next_to_write += 1
         if next_to_write != n:
-            missing = sorted(set(range(n)) - set(range(next_to_write)) - set(pending))
-            raise RuntimeError(f"{split}: missing samples after parallel simulation: {missing[:10]}")
+            raise RuntimeError(f"generated {next_to_write} samples, expected {n}")
     else:
-        for t in tqdm(tasks, desc=f"simulate {split}"):
+        for t in tqdm(tasks, desc="simulate samples"):
             handle_sample(simulate_one_with_retries(t))
 
     if samples_buffer:
         shard_idx = len(shard_paths)
-        path = split_dir / f"{split}_{shard_idx:05d}.npz"
+        path = samples_dir / f"shard_{shard_idx:05d}.npz"
         write_shard(samples_buffer, path, cfg)
         shard_paths.append(str(path.relative_to(cfg.out_dir)))
 
     if len(metadata_rows) != n:
-        raise RuntimeError(f"{split}: generated {len(metadata_rows)} samples, expected {n}")
+        raise RuntimeError(f"generated {len(metadata_rows)} samples, expected {n}")
 
-    split_manifest = {
-        "split": split,
+    metadata_paths = _write_metadata(metadata_rows, full_metadata, out_dir)
+    manifest = {
         "n_samples": len(metadata_rows),
         "n_shards": len(shard_paths),
         "shards": shard_paths,
+        "metadata": metadata_paths,
+        "empirical_maps": empirical.metadata,
         "source_counts": source_counts,
         "demography_counts": demo_counts,
+        "map_counts": map_counts,
     }
-    done.write_text(json.dumps(split_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    pd.DataFrame(metadata_rows).to_csv(split_dir / f"{split}_samples.csv", index=False)
-    return split_manifest
+    done.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest

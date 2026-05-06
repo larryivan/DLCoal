@@ -21,8 +21,8 @@ def _ensure_haplotype_count(G: np.ndarray, n_haplotypes: int) -> np.ndarray:
     return np.concatenate([G, pad], axis=1)
 
 
-def simulate_one(task: tuple[int, str, dict, dict, int]) -> dict:
-    index, split, cfg_dict, empirical_dict, seed = task
+def simulate_one(task: tuple[int, dict, dict, int]) -> dict:
+    index, cfg_dict, empirical_dict, seed = task
     cfg = Config(**cfg_dict)
     empirical = EmpiricalMapStore(
         rec_maps=empirical_dict.get("rec_maps", {}),
@@ -30,14 +30,14 @@ def simulate_one(task: tuple[int, str, dict, dict, int]) -> dict:
     )
     rng = rng_from_seed(seed)
     empirical_available = empirical.is_available(cfg.seq_len)
-    sample_id = f"{split}_{index:08d}_{seed % 10**8:08d}"
+    sample_id = f"sim_{index:08d}"
 
-    source = choose_source(rng, cfg, split, empirical_available)
+    source = choose_source(rng, cfg, empirical_available)
 
     ts = None
     std_meta: dict = {}
     if source == "stdpopsim_anchor":
-        std_res = try_stdpopsim_sample(rng, cfg, split)
+        std_res = try_stdpopsim_sample(rng, cfg)
         if std_res is not None:
             ts, y, std_meta, _ = std_res
             source = "stdpopsim_anchor"
@@ -50,8 +50,8 @@ def simulate_one(task: tuple[int, str, dict, dict, int]) -> dict:
     map_meta: dict = {}
 
     if ts is None:
-        dem, y, dem_meta = sample_custom_demography(rng, cfg, split)
-        maps = sample_maps_for_source(rng, cfg, source, split, empirical)
+        dem, y, dem_meta = sample_custom_demography(rng, cfg)
+        maps = sample_maps_for_source(rng, cfg, source, empirical)
         true_rec_pos, true_rec_rate, obs_rec_pos, obs_rec_rate, true_mut_pos, true_mut_rate, obs_mut_pos, obs_mut_rate, map_meta = maps
         rec_map = make_rate_map(true_rec_pos, true_rec_rate)
         mut_map = make_rate_map(true_mut_pos, true_mut_rate)
@@ -75,7 +75,12 @@ def simulate_one(task: tuple[int, str, dict, dict, int]) -> dict:
         true_mut_pos, true_mut_rate = constant_map(int(ts.sequence_length), cfg.baseline_mu)
         obs_rec_pos, obs_rec_rate = true_rec_pos.copy(), true_rec_rate.copy()
         obs_mut_pos, obs_mut_rate = true_mut_pos.copy(), true_mut_rate.copy()
-        map_meta = {"map_type": "stdpopsim_or_constant_fallback"}
+        map_meta = {
+            "map_type": "stdpopsim_or_constant_fallback",
+            "map_mode": "constant_fallback",
+            "recomb_mode": "constant_fallback",
+            "mu_mode": "constant_fallback",
+        }
 
     G = ts.genotype_matrix()
     if G.shape[0] > 0:
@@ -85,9 +90,9 @@ def simulate_one(task: tuple[int, str, dict, dict, int]) -> dict:
         G = np.zeros((0, cfg.n_haplotypes), dtype=np.uint8)
         positions = np.zeros(0, dtype=np.float64)
 
-    from .noise import noise_params_for_split
+    from .noise import noise_params_for_sample
 
-    noise = noise_params_for_split(rng, cfg, split, source)
+    noise = noise_params_for_sample(rng, cfg, source)
     G_noisy, missing = apply_genotype_noise(G, rng, noise["genotype_error"], noise["missing_rate"])
 
     packed = pack_haplotypes(G_noisy, cfg.n_haplotypes)
@@ -97,9 +102,10 @@ def simulate_one(task: tuple[int, str, dict, dict, int]) -> dict:
     meta = {
         "sample_id": sample_id,
         "sample_index": int(index),
-        "split": split,
         "source_type": source,
         "source_id": SOURCE_IDS.get(source, -1),
+        "scenario": dem_meta.get("scenario", dem_meta.get("demography_type", "stdpopsim")),
+        "noise_profile": noise.get("profile", "unknown"),
         "sequence_length": int(round(ts.sequence_length)),
         "n_haplotypes": cfg.n_haplotypes,
         "n_variants": int(G_noisy.shape[0]),
@@ -113,7 +119,6 @@ def simulate_one(task: tuple[int, str, dict, dict, int]) -> dict:
 
     out = {
         "sample_id": sample_id,
-        "split": split,
         "source_id": SOURCE_IDS.get(source, -1),
         "demo_id": DEMO_IDS.get(meta.get("demography_type", "stdpopsim"), 9),
         "positions": positions_u32,
@@ -138,8 +143,8 @@ def simulate_one(task: tuple[int, str, dict, dict, int]) -> dict:
     return out
 
 
-def simulate_one_with_retries(task: tuple[int, str, dict, dict, int]) -> dict:
-    cfg = Config(**task[2])
+def simulate_one_with_retries(task: tuple[int, dict, dict, int]) -> dict:
+    cfg = Config(**task[1])
     current = task
     last_error: Exception | None = None
     for attempt in range(cfg.max_retries):
@@ -147,5 +152,5 @@ def simulate_one_with_retries(task: tuple[int, str, dict, dict, int]) -> dict:
             return simulate_one(current)
         except Exception as exc:
             last_error = exc
-            current = (task[0], task[1], task[2], task[3], task[4] + 17 * (attempt + 1))
-    raise RuntimeError(f"sample {task[1]}[{task[0]}] failed after {cfg.max_retries} attempts: {last_error}") from last_error
+            current = (task[0], task[1], task[2], task[3] + 17 * (attempt + 1))
+    raise RuntimeError(f"sample[{task[0]}] failed after {cfg.max_retries} attempts: {last_error}") from last_error

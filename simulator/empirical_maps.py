@@ -15,6 +15,11 @@ class PiecewiseRateMap:
     position: np.ndarray
     rate: np.ndarray
     rate_unit: str = "per_bp_per_generation"
+    rate_unit_before: str = "per_bp"
+    rate_unit_after: str = "per_bp_per_generation"
+    mean_rate_before_scaling: float = 0.0
+    mean_rate_after_scaling: float = 0.0
+    scaling_method: str = "identity"
     source_format: str = "unknown"
 
     @property
@@ -26,6 +31,7 @@ class PiecewiseRateMap:
 class EmpiricalMapStore:
     rec_maps: dict[str, PiecewiseRateMap] = field(default_factory=dict)
     mut_maps: dict[str, PiecewiseRateMap] = field(default_factory=dict)
+    metadata: dict[str, dict] = field(default_factory=dict)
 
     def common_chroms(self, min_len: int) -> list[str]:
         chroms = sorted(set(self.rec_maps) & set(self.mut_maps), key=_chrom_sort_key)
@@ -56,25 +62,73 @@ def _read_table_maybe_gzip(path: str) -> pd.DataFrame:
 
 ROULETTE_RAW_TO_PER_GEN = 1.015e-7
 RECOMB_CM_PER_MB_TO_PER_BP = 1.0e-8
+RECOMB_MAP_UNITS = {"per_bp", "cM_per_Mb"}
+MUT_MAP_UNITS = {"per_bp", "relative", "roulette_raw"}
 
 
-def _scale_rates(rates: np.ndarray, baseline_rate: float | None, map_kind: str) -> tuple[np.ndarray, str]:
-    rates = np.nan_to_num(rates, nan=baseline_rate or 1e-8, posinf=baseline_rate or 1e-8, neginf=0.0)
-    unit = "per_bp_per_generation"
-    if len(rates) and np.nanmean(rates) > 1e-6:
-        if map_kind == "recombination":
+def _finite_mean(rates: np.ndarray) -> float:
+    finite = np.asarray(rates, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(np.mean(finite)) if len(finite) else 0.0
+
+
+def _scale_rates(
+    rates: np.ndarray,
+    baseline_rate: float | None,
+    map_kind: str,
+    input_unit: str,
+    scale_to_baseline: bool,
+) -> tuple[np.ndarray, dict]:
+    if map_kind == "recombination" and input_unit not in RECOMB_MAP_UNITS:
+        raise ValueError(f"Unsupported recombination map unit: {input_unit}")
+    if map_kind == "mutation" and input_unit not in MUT_MAP_UNITS:
+        raise ValueError(f"Unsupported mutation map unit: {input_unit}")
+
+    before_mean = _finite_mean(rates)
+    fill = baseline_rate if baseline_rate is not None else 1e-8
+    rates = np.nan_to_num(rates.astype(np.float64, copy=False), nan=fill, posinf=fill, neginf=0.0)
+
+    method = "identity"
+    if map_kind == "recombination":
+        if input_unit == "cM_per_Mb":
             rates = rates * RECOMB_CM_PER_MB_TO_PER_BP
-            unit = "cM_per_Mb_scaled_to_per_bp_per_generation"
-        elif map_kind == "mutation":
-            rates = rates * ROULETTE_RAW_TO_PER_GEN
-            unit = "roulette_raw_scaled_to_per_bp_per_generation"
+            method = "cM_per_Mb_to_per_bp_per_generation"
+    elif input_unit == "roulette_raw":
+        rates = rates * ROULETTE_RAW_TO_PER_GEN
+        method = "roulette_raw_to_per_bp_per_generation"
+        if scale_to_baseline and baseline_rate is not None:
+            mean_after_conversion = _finite_mean(rates)
+            if mean_after_conversion > 0:
+                rates = rates * (float(baseline_rate) / mean_after_conversion)
+                method += "+mean_to_baseline"
+    elif input_unit == "relative":
+        if baseline_rate is None:
+            raise ValueError("relative mutation maps require a baseline mutation rate")
+        positive_mean = _finite_mean(rates[rates > 0])
+        if scale_to_baseline:
+            if positive_mean <= 0:
+                raise ValueError("relative mutation map has no positive rates to normalize")
+            rates = rates * (float(baseline_rate) / positive_mean)
+            method = "relative_mean_to_baseline"
+        else:
+            rates = rates * float(baseline_rate)
+            method = "relative_multiplier_to_baseline"
+
     rates = np.clip(rates, 0.0, None)
     if len(rates) and np.nanmax(rates) > 1e-4:
         raise ValueError(
             f"{map_kind} map rates look too large for msprime per-bp per-generation rates; "
-            "use Chromosome/Start/End/Rate with Rate already scaled to probability per bp per generation"
+            "set --recomb-map-unit/--mut-map-unit explicitly so rates can be converted"
         )
-    return rates, unit
+    after_mean = _finite_mean(rates)
+    info = {
+        "rate_unit_before": input_unit,
+        "rate_unit_after": "per_bp_per_generation",
+        "mean_rate_before_scaling": before_mean,
+        "mean_rate_after_scaling": after_mean,
+        "scaling_method": method,
+    }
+    return rates, info
 
 
 def _piecewise_from_points(
@@ -83,6 +137,8 @@ def _piecewise_from_points(
     rate_points: np.ndarray,
     baseline_rate: float | None,
     map_kind: str,
+    input_unit: str,
+    scale_to_baseline: bool,
 ) -> PiecewiseRateMap:
     order = np.argsort(pos)
     pos = pos[order].astype(np.float64, copy=False)
@@ -105,12 +161,13 @@ def _piecewise_from_points(
     else:
         step = 1_000.0
         boundaries = np.array([max(0.0, pos[0] - step / 2.0), pos[0] + step / 2.0], dtype=np.float64)
-    rates, unit = _scale_rates(rate_points, baseline_rate, map_kind)
+    rates, scaling = _scale_rates(rate_points, baseline_rate, map_kind, input_unit, scale_to_baseline)
     return PiecewiseRateMap(
         chrom=chrom,
         position=boundaries.astype(np.float64),
         rate=rates.astype(np.float64),
-        rate_unit=unit,
+        rate_unit=scaling["rate_unit_after"],
+        **scaling,
         source_format="point_centers",
     )
 
@@ -122,6 +179,8 @@ def _piecewise_from_intervals(
     rates: np.ndarray,
     baseline_rate: float | None,
     map_kind: str,
+    input_unit: str,
+    scale_to_baseline: bool,
 ) -> PiecewiseRateMap:
     order = np.argsort(starts)
     starts = starts[order].astype(np.float64, copy=False)
@@ -134,7 +193,7 @@ def _piecewise_from_intervals(
     if len(starts) == 0:
         raise ValueError(f"No valid intervals for empirical map chromosome {chrom}")
 
-    rates, unit = _scale_rates(rates, baseline_rate, map_kind)
+    rates, scaling = _scale_rates(rates, baseline_rate, map_kind, input_unit, scale_to_baseline)
     filler = baseline_rate if baseline_rate is not None else float(np.nanmedian(rates))
     positions = [0.0]
     out_rates: list[float] = []
@@ -163,7 +222,8 @@ def _piecewise_from_intervals(
         chrom=chrom,
         position=positions_arr,
         rate=rates_arr.astype(np.float64),
-        rate_unit=unit,
+        rate_unit=scaling["rate_unit_after"],
+        **scaling,
         source_format="bed_intervals",
     )
 
@@ -172,12 +232,14 @@ def load_empirical_rate_table(
     path: str,
     baseline_rate: float | None = None,
     map_kind: str = "generic",
+    rate_unit: str = "per_bp",
+    scale_to_baseline: bool = True,
 ) -> dict[str, PiecewiseRateMap]:
     """Load BED-like or position-rate maps, preserving chromosome boundaries.
 
     Canonical input is a BED-like interval table with columns:
     chrom, start, end, rate. Coordinates are 0-based half-open intervals and
-    rate is per bp per generation.
+    rate is per bp per generation unless rate_unit explicitly says otherwise.
 
     Legacy point-center maps are accepted and converted to interval boundaries
     with midpoint cuts. Missing interval gaps are filled with baseline_rate so
@@ -200,6 +262,8 @@ def load_empirical_rate_table(
                 sub["rate"].to_numpy(),
                 baseline_rate,
                 map_kind,
+                rate_unit,
+                scale_to_baseline,
             )
     elif df.shape[1] == 3:
         chrom_col = df.iloc[:, 0].map(_canonical_chrom)
@@ -213,6 +277,8 @@ def load_empirical_rate_table(
                 sub["rate"].to_numpy(),
                 baseline_rate,
                 map_kind,
+                rate_unit,
+                scale_to_baseline,
             )
     elif df.shape[1] == 2:
         pos = pd.to_numeric(df.iloc[:, 0], errors="coerce")
@@ -224,6 +290,8 @@ def load_empirical_rate_table(
             parsed["rate"].to_numpy(),
             baseline_rate,
             map_kind,
+            rate_unit,
+            scale_to_baseline,
         )
     else:
         raise ValueError(f"Cannot parse empirical map: {path}")
@@ -233,14 +301,47 @@ def load_empirical_rate_table(
     return maps
 
 
+def _summarize_maps(path: str, maps: dict[str, PiecewiseRateMap], requested_unit: str) -> dict:
+    methods = sorted({m.scaling_method for m in maps.values()})
+    formats = sorted({m.source_format for m in maps.values()})
+    before = [m.mean_rate_before_scaling for m in maps.values()]
+    after = [m.mean_rate_after_scaling for m in maps.values()]
+    return {
+        "path": path,
+        "requested_rate_unit": requested_unit,
+        "rate_unit_before": requested_unit,
+        "rate_unit_after": "per_bp_per_generation",
+        "mean_rate_before_scaling": float(np.mean(before)) if before else 0.0,
+        "mean_rate_after_scaling": float(np.mean(after)) if after else 0.0,
+        "scaling_method": "+".join(methods) if methods else "unknown",
+        "source_formats": formats,
+        "n_chromosomes": len(maps),
+        "chromosomes": sorted(maps, key=_chrom_sort_key),
+    }
+
+
 def load_empirical_maps(cfg: Config) -> EmpiricalMapStore:
     store = EmpiricalMapStore()
     if cfg.recomb_map and Path(cfg.recomb_map).exists():
         print(f"[maps] loading empirical recombination map: {cfg.recomb_map}")
-        store.rec_maps = load_empirical_rate_table(cfg.recomb_map, cfg.baseline_rec, map_kind="recombination")
+        store.rec_maps = load_empirical_rate_table(
+            cfg.recomb_map,
+            cfg.baseline_rec,
+            map_kind="recombination",
+            rate_unit=cfg.recomb_map_unit,
+            scale_to_baseline=False,
+        )
+        store.metadata["recombination"] = _summarize_maps(cfg.recomb_map, store.rec_maps, cfg.recomb_map_unit)
     if cfg.mut_map and Path(cfg.mut_map).exists():
         print(f"[maps] loading empirical mutation map: {cfg.mut_map}")
-        store.mut_maps = load_empirical_rate_table(cfg.mut_map, cfg.baseline_mu, map_kind="mutation")
+        store.mut_maps = load_empirical_rate_table(
+            cfg.mut_map,
+            cfg.baseline_mu,
+            map_kind="mutation",
+            rate_unit=cfg.mut_map_unit,
+            scale_to_baseline=cfg.mut_map_scale_to_baseline,
+        )
+        store.metadata["mutation"] = _summarize_maps(cfg.mut_map, store.mut_maps, cfg.mut_map_unit)
     return store
 
 
@@ -284,6 +385,11 @@ def slice_piecewise_map(
         "slice_start_bp": start,
         "slice_end_bp": end,
         "rate_unit": rate_map.rate_unit,
+        "rate_unit_before": rate_map.rate_unit_before,
+        "rate_unit_after": rate_map.rate_unit_after,
+        "mean_rate_before_scaling": rate_map.mean_rate_before_scaling,
+        "mean_rate_after_scaling": rate_map.mean_rate_after_scaling,
+        "scaling_method": rate_map.scaling_method,
         "source_format": rate_map.source_format,
     }
     return pos.astype(np.float64), true_rate.astype(np.float64), pos.astype(np.float64), obs_rate.astype(np.float64), meta

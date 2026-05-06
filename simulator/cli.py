@@ -4,27 +4,45 @@ import argparse
 import dataclasses
 from pathlib import Path
 
-from .config import Config, apply_preset, split_names
+from .config import Config, apply_preset
 from .dataset_files import write_dataset_files
 from .empirical_maps import load_empirical_maps
-from .shards import generate_split
+from .shards import generate_dataset
 
 
 def parse_args() -> Config:
     base = apply_preset(Config())
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
+    bool_fields = {"force", "compression", "include_truth", "enable_stdpopsim", "mut_map_scale_to_baseline"}
+    choice_fields = {"recomb_map_unit", "mut_map_unit"}
     for f in dataclasses.fields(Config):
-        if f.name in {"force", "compression", "include_truth", "enable_stdpopsim"}:
+        if f.name in bool_fields or f.name in choice_fields:
             continue
         default = getattr(base, f.name)
         parser.add_argument("--" + f.name.replace("_", "-"), dest=f.name, type=type(default), default=None)
+    parser.add_argument("--n", dest="n_samples", type=int, default=None, help="alias for --n-samples")
+    parser.add_argument("--recomb-map-unit", choices=["per_bp", "cM_per_Mb"], default=None)
+    parser.add_argument("--mut-map-unit", choices=["per_bp", "relative", "roulette_raw"], default=None)
 
-    parser.add_argument("--force", action="store_true", help="overwrite an existing split directory")
+    parser.add_argument("--force", action="store_true", help="overwrite an existing simulator output directory")
     parser.add_argument("--include-truth", action="store_true", help="store true maps for analysis; not model inputs")
     parser.add_argument("--enable-stdpopsim", action="store_true", help="include optional stdpopsim anchors")
+    parser.add_argument(
+        "--mut-map-scale-to-baseline",
+        dest="mut_map_scale_to_baseline",
+        action="store_true",
+        help="normalize relative or raw mutation maps to baseline_mu after unit conversion",
+    )
+    parser.add_argument(
+        "--no-mut-map-scale-to-baseline",
+        dest="mut_map_scale_to_baseline",
+        action="store_false",
+        help="preserve the absolute scale implied by --mut-map-unit",
+    )
     parser.add_argument("--no-compression", dest="compression", action="store_false", help="write uncompressed npz shards")
     parser.set_defaults(compression=None)
+    parser.set_defaults(mut_map_scale_to_baseline=None)
 
     ns = parser.parse_args()
     preset = ns.preset if ns.preset is not None else "mini"
@@ -52,11 +70,8 @@ def main() -> None:
     if (cfg.recomb_map or cfg.mut_map) and not empirical.is_available(cfg.seq_len):
         print("[warn] empirical maps unavailable, incomplete, or shorter than seq_len; empirical source will be disabled")
 
-    split_manifests: dict[str, dict] = {}
-    for split in split_names(cfg):
-        split_manifests[split] = generate_split(cfg, split, empirical)
-        write_dataset_files(cfg, split_manifests)
-    write_dataset_files(cfg, split_manifests)
+    sample_manifest = generate_dataset(cfg, empirical)
+    write_dataset_files(cfg, sample_manifest)
     print("[done] dataset written to", cfg.out_dir)
     print("       manifest:", Path(cfg.out_dir) / "manifest.json")
     print("       loader:  ", Path(cfg.out_dir) / "scripts" / "loader.py")
