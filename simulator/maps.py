@@ -41,6 +41,22 @@ def _segment_range(cfg: Config, is_mut: bool) -> tuple[int, int]:
     return lo, hi
 
 
+def _sample_bp_width(rng: np.random.Generator, length: int, lo: float, hi: float) -> float:
+    upper = max(1.0, min(float(hi), float(length)))
+    lower = max(1.0, min(float(lo), upper))
+    return loguniform(rng, lower, upper)
+
+
+def _overlapping_intervals(pos: np.ndarray, center: float, width: float) -> np.ndarray:
+    left = max(0.0, float(center) - float(width) / 2.0)
+    right = min(float(pos[-1]), float(center) + float(width) / 2.0)
+    mask = (pos[:-1] < right) & (pos[1:] > left)
+    if not mask.any():
+        idx = int(np.clip(np.searchsorted(pos, center, side="right") - 1, 0, len(pos) - 2))
+        mask[idx] = True
+    return mask
+
+
 def synthetic_heterogeneous_map(
     rng: np.random.Generator,
     cfg: Config,
@@ -61,6 +77,8 @@ def synthetic_heterogeneous_map(
     rw = (rw - rw.mean()) / (rw.std() + 1e-8)
     rates = baseline * np.exp((0.25 if is_mut else 0.55) * rw)
 
+    hot_widths: list[float] = []
+    cold_widths: list[float] = []
     if is_mut:
         n_hot = int(rng.integers(1, 5))
         hot_factor = (2, 12)
@@ -68,15 +86,17 @@ def synthetic_heterogeneous_map(
         n_hot = int(rng.integers(3, 16))
         hot_factor = (5, 80)
     for _ in range(n_hot):
-        c = int(rng.integers(0, n))
-        width = int(rng.integers(1, 4))
-        rates[max(0, c - width) : min(n, c + width + 1)] *= rng.uniform(*hot_factor)
+        center = float(rng.uniform(0, length))
+        width = _sample_bp_width(rng, length, 1_000.0, 20_000.0)
+        hot_widths.append(width)
+        rates[_overlapping_intervals(pos, center, width)] *= rng.uniform(*hot_factor)
 
     n_cold = int(rng.integers(0, 4))
     for _ in range(n_cold):
-        c = int(rng.integers(0, n))
-        width = int(rng.integers(2, 16))
-        rates[max(0, c - width) : min(n, c + width + 1)] *= rng.uniform(0.01, 0.3)
+        center = float(rng.uniform(0, length))
+        width = _sample_bp_width(rng, length, 50_000.0, 2_000_000.0)
+        cold_widths.append(width)
+        rates[_overlapping_intervals(pos, center, width)] *= rng.uniform(0.01, 0.3)
 
     rates = rates * (baseline / (rates.mean() + 1e-30))
     rates = np.clip(rates, baseline * 1e-5, baseline * 200)
@@ -90,6 +110,11 @@ def synthetic_heterogeneous_map(
     meta = {
         "synthetic_map_segments": int(n),
         "map_is_mutation": bool(is_mut),
+        "hotspot_model": "bp_interval_overlap",
+        "hotspot_count": int(n_hot),
+        "coldspot_count": int(n_cold),
+        "hotspot_width_bp_mean": float(np.mean(hot_widths)) if hot_widths else 0.0,
+        "coldspot_width_bp_mean": float(np.mean(cold_widths)) if cold_widths else 0.0,
         "observed_noise_sigma": float(obs_noise_sigma),
     }
     return pos, rates.astype(np.float64), pos.copy(), obs.astype(np.float64), meta

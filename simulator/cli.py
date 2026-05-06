@@ -4,7 +4,7 @@ import argparse
 import dataclasses
 from pathlib import Path
 
-from .config import Config, apply_preset
+from .config import Config, apply_preset, validate_config
 from .dataset_files import write_dataset_files
 from .empirical_maps import load_empirical_maps
 from .shards import generate_dataset
@@ -54,6 +54,10 @@ def parse_args() -> Config:
     if cfg.enable_stdpopsim and cfg.p_stdpopsim_anchor == 0.0:
         cfg.p_stdpopsim_anchor = 0.10
         cfg.p_custom_hetero = max(0.0, cfg.p_custom_hetero - 0.10)
+    try:
+        validate_config(cfg)
+    except ValueError as exc:
+        parser.error(str(exc))
     return cfg
 
 

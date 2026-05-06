@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from .config import Config
 from .empirical_maps import EmpiricalMapStore
-from .sample import simulate_one_with_retries
+from .sample import init_worker, simulate_one_with_retries
 from .utils import resolve_workers, safe_json_dumps
 
 
@@ -98,10 +98,6 @@ def write_shard(samples: list[dict], out_path: Path, cfg: Config) -> None:
             f.write(safe_json_dumps(s["metadata"]) + "\n")
 
 
-def _empirical_to_dict(empirical: EmpiricalMapStore) -> dict:
-    return {"rec_maps": empirical.rec_maps, "mut_maps": empirical.mut_maps}
-
-
 def _metadata_row(meta: dict) -> dict:
     rec_slice = meta.get("rec_slice", {})
     mut_slice = meta.get("mut_slice", {})
@@ -110,7 +106,20 @@ def _metadata_row(meta: dict) -> dict:
         "sample_index": meta.get("sample_index", 0),
         "source_type": meta.get("source_type", ""),
         "scenario": meta.get("scenario", ""),
+        "scenario_key": meta.get("scenario_key", ""),
         "demography_type": meta.get("demography_type", ""),
+        "demography_mixture_version": meta.get("demography_mixture_version", ""),
+        "n_epochs": meta.get("n_epochs", 0),
+        "n_change_points": meta.get("n_change_points", 0),
+        "has_recent_event": meta.get("has_recent_event", False),
+        "has_ancient_event": meta.get("has_ancient_event", False),
+        "min_Ne": meta.get("min_Ne", 0.0),
+        "max_Ne": meta.get("max_Ne", 0.0),
+        "Ne_ratio_max_min": meta.get("Ne_ratio_max_min", 0.0),
+        "recent_min_Ne": meta.get("recent_min_Ne", 0.0),
+        "ancient_mean_Ne": meta.get("ancient_mean_Ne", 0.0),
+        "event_severity": meta.get("event_severity", 0.0),
+        "event_duration": meta.get("event_duration", 0.0),
         "map_type": meta.get("map_type", ""),
         "map_mode": meta.get("map_mode", ""),
         "recomb_mode": meta.get("recomb_mode", ""),
@@ -121,7 +130,12 @@ def _metadata_row(meta: dict) -> dict:
         "num_sites": meta.get("num_sites", 0),
         "sequence_length": meta.get("sequence_length", 0),
         "n_haplotypes": meta.get("n_haplotypes", 0),
+        "n_diploid_individuals": meta.get("n_diploid_individuals", 0),
+        "sample_ploidy": meta.get("sample_ploidy", 0),
         "seed": meta.get("seed", 0),
+        "phase_switch_rate_per_mb": meta.get("noise", {}).get("phase_switch_rate_per_mb", 0.0),
+        "phase_switch_count": meta.get("noise", {}).get("phase_switch_count", 0),
+        "phase_pairing": meta.get("phase_pairing", ""),
         "recomb_rate_unit_before": rec_slice.get("rate_unit_before", ""),
         "recomb_rate_unit_after": rec_slice.get("rate_unit_after", ""),
         "recomb_scaling_method": rec_slice.get("scaling_method", ""),
@@ -169,9 +183,8 @@ def generate_dataset(cfg: Config, empirical: EmpiricalMapStore) -> dict:
 
     print(f"[generate] samples n={n} shard_size={cfg.shard_size}")
     cfg_dict = dataclasses.asdict(cfg)
-    empirical_dict = _empirical_to_dict(empirical)
     seeds = [cfg.seed + i * 7919 for i in range(n)]
-    tasks = [(i, cfg_dict, empirical_dict, seeds[i]) for i in range(n)]
+    tasks = [(i, seeds[i]) for i in range(n)]
 
     workers = resolve_workers(cfg.workers)
     samples_buffer: list[dict] = []
@@ -204,7 +217,7 @@ def generate_dataset(cfg: Config, empirical: EmpiricalMapStore) -> dict:
     if workers > 1:
         pending: dict[int, dict] = {}
         next_to_write = 0
-        with ProcessPoolExecutor(max_workers=workers) as ex:
+        with ProcessPoolExecutor(max_workers=workers, initializer=init_worker, initargs=(cfg_dict,)) as ex:
             futures = {ex.submit(simulate_one_with_retries, t): t[0] for t in tasks}
             for fut in tqdm(as_completed(futures), total=n, desc="simulate samples"):
                 sample = fut.result()
@@ -216,6 +229,7 @@ def generate_dataset(cfg: Config, empirical: EmpiricalMapStore) -> dict:
         if next_to_write != n:
             raise RuntimeError(f"generated {next_to_write} samples, expected {n}")
     else:
+        init_worker(cfg_dict)
         for t in tqdm(tasks, desc="simulate samples"):
             handle_sample(simulate_one_with_retries(t))
 

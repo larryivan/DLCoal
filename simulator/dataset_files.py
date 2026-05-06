@@ -19,6 +19,7 @@ history inference from haplotype data.
 The dataset stores simulated observations, not model-specific feature engineering:
 
 - bit-packed haplotype genotypes
+- diploid individuals represented by adjacent haplotype columns
 - variant positions
 - observed recombination/mutation maps
 - target log10 Ne(t), averaged within each logarithmic time bin
@@ -38,6 +39,31 @@ not precomputed in the core dataset.
 
 Targets are log-time bin averages, not midpoint samples. This keeps short
 events such as recent bottlenecks visible in labels when they overlap a time bin.
+Main simulator samples are generated as diploid individuals (`ploidy=2`), so
+`n_haplotypes` must be even. Phase switch noise swaps the two haplotypes within
+each diploid individual after sampled switch points; this is recorded as
+`phase_switch_model="diploid_pair_switch"` and `phase_pairing`.
+`scenario_key` combines demography, map mode, and noise profile for convenient
+filtering without making fixed train/validation/test splits.
+
+Demography sampling uses a v0.2 registry of named samplers rather than one large
+conditional block. It includes constant and near-constant controls, recent
+bottlenecks, recent founder recovery, continuous exponential growth/decline
+approximated by multiple epochs, serial founder events, ancient+recent compound
+events, and mild/strong oscillating histories. Metadata includes summary fields
+such as `n_epochs`, `has_recent_event`, `has_ancient_event`, `min_Ne`, `max_Ne`,
+`Ne_ratio_max_min`, `recent_min_Ne`, `ancient_mean_Ne`, `event_severity`, and
+`event_duration` for filtering and benchmark recipes.
+
+stdpopsim samples are optional anchors/stress samples. They are disabled by
+default (`p_stdpopsim_anchor=0`) and are included only when requested with
+`--enable-stdpopsim`. Their target metadata keeps `target_quality` because many
+stdpopsim models include population structure, migration, or admixture, so these
+anchors should not be treated as the same strict single-population supervision as
+the custom simulator samples.
+Two-population migration/admixture stress cases should follow the same anchor
+pattern and be labeled with proxy target quality rather than mixed into the strict
+single-population supervised core.
 
 ## Official Model Inputs
 

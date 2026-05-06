@@ -23,6 +23,14 @@ DEMO_IDS = {
     "ancient_event": 7,
     "constant": 8,
     "stdpopsim": 9,
+    "near_constant": 10,
+    "continuous_exponential_growth": 11,
+    "continuous_exponential_decline": 12,
+    "recent_founder_recovery": 13,
+    "serial_founder": 14,
+    "ancient_recent_compound": 15,
+    "oscillating_mild": 16,
+    "zigzag_strong": 17,
 }
 ID_TO_DEMO = {v: k for k, v in DEMO_IDS.items()}
 
@@ -33,6 +41,7 @@ class Config:
     out_dir: str = "./DLCoalSim-Out"
     seed: int = 12345
     force: bool = False
+    demography_mixture_version: str = "v0.2"
 
     n_samples: int = 2000
     shard_size: int = 64
@@ -51,14 +60,23 @@ class Config:
     p_empirical_slice: float = 0.10
     p_stdpopsim_anchor: float = 0.00
 
-    p_smooth_random_walk: float = 0.25
-    p_single_bottleneck: float = 0.18
-    p_recent_bottleneck: float = 0.17
-    p_expansion: float = 0.12
-    p_contraction: float = 0.08
-    p_three_epoch: float = 0.10
-    p_zigzag: float = 0.07
+    p_constant: float = 0.05
+    p_near_constant: float = 0.05
+    p_smooth_random_walk: float = 0.12
+    p_single_bottleneck: float = 0.12
+    p_recent_bottleneck: float = 0.15
+    p_recent_founder_recovery: float = 0.12
+    p_continuous_exponential_growth: float = 0.10
+    p_continuous_exponential_decline: float = 0.05
+    p_three_epoch: float = 0.08
+    p_serial_founder: float = 0.05
     p_ancient_event: float = 0.03
+    p_ancient_recent_compound: float = 0.03
+    p_oscillating_mild: float = 0.01
+    p_zigzag_strong: float = 0.01
+    p_expansion: float = 0.01
+    p_contraction: float = 0.01
+    p_zigzag: float = 0.01
 
     map_segments_min: int = 128
     map_segments_max: int = 512
@@ -75,6 +93,8 @@ class Config:
     genotype_error_max: float = 0.004
     missing_rate_min: float = 0.002
     missing_rate_max: float = 0.020
+    phase_switch_rate_per_mb_min: float = 0.0
+    phase_switch_rate_per_mb_max: float = 0.05
 
     enable_stdpopsim: bool = False
     stdpopsim_species: str = "HomSap"
@@ -127,3 +147,10 @@ def apply_preset(cfg: Config) -> Config:
     else:
         raise ValueError(f"Unknown preset: {cfg.preset}")
     return cfg
+
+
+def validate_config(cfg: Config) -> None:
+    if cfg.n_haplotypes < 2:
+        raise ValueError("n_haplotypes must be at least 2")
+    if cfg.n_haplotypes % 2 != 0:
+        raise ValueError("n_haplotypes must be even because samples are simulated as diploid individuals")

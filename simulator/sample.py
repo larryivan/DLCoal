@@ -3,13 +3,64 @@ from __future__ import annotations
 import msprime
 import numpy as np
 
-from .config import Config, DEMO_IDS, SOURCE_IDS
+from .config import Config, DEMO_IDS, SOURCE_IDS, validate_config
 from .demography import sample_custom_demography
 from .empirical_maps import EmpiricalMapStore
 from .maps import choose_source, constant_map, make_rate_map, sample_maps_for_source
 from .noise import apply_genotype_noise, pack_haplotypes
 from .stdpopsim_support import try_stdpopsim_sample
 from .utils import rng_from_seed
+
+
+_WORKER_CFG: Config | None = None
+_WORKER_EMPIRICAL: EmpiricalMapStore | None = None
+
+
+def init_worker(cfg_dict: dict) -> None:
+    global _WORKER_CFG, _WORKER_EMPIRICAL
+    _WORKER_CFG = Config(**cfg_dict)
+    validate_config(_WORKER_CFG)
+    _WORKER_EMPIRICAL = None
+
+
+def _get_worker_cfg(cfg_dict: dict | None = None) -> Config:
+    global _WORKER_CFG
+    if cfg_dict is not None:
+        cfg = Config(**cfg_dict)
+        validate_config(cfg)
+        return cfg
+    if _WORKER_CFG is None:
+        raise RuntimeError("simulator worker was not initialized")
+    validate_config(_WORKER_CFG)
+    return _WORKER_CFG
+
+
+def _get_worker_empirical(cfg: Config, empirical_dict: dict | None = None) -> EmpiricalMapStore:
+    global _WORKER_EMPIRICAL
+    if empirical_dict is not None:
+        return EmpiricalMapStore(
+            rec_maps=empirical_dict.get("rec_maps", {}),
+            mut_maps=empirical_dict.get("mut_maps", {}),
+        )
+    if _WORKER_EMPIRICAL is None:
+        from .empirical_maps import load_empirical_maps
+
+        _WORKER_EMPIRICAL = load_empirical_maps(cfg)
+    return _WORKER_EMPIRICAL
+
+
+def _parse_task(task: tuple) -> tuple[int, Config, EmpiricalMapStore, int]:
+    if len(task) == 2:
+        index, seed = task
+        cfg = _get_worker_cfg()
+        empirical = _get_worker_empirical(cfg)
+        return int(index), cfg, empirical, int(seed)
+    if len(task) == 4:
+        index, cfg_dict, empirical_dict, seed = task
+        cfg = _get_worker_cfg(cfg_dict)
+        empirical = _get_worker_empirical(cfg, empirical_dict)
+        return int(index), cfg, empirical, int(seed)
+    raise ValueError(f"Unsupported simulator task shape: {len(task)}")
 
 
 def _ensure_haplotype_count(G: np.ndarray, n_haplotypes: int) -> np.ndarray:
@@ -21,13 +72,8 @@ def _ensure_haplotype_count(G: np.ndarray, n_haplotypes: int) -> np.ndarray:
     return np.concatenate([G, pad], axis=1)
 
 
-def simulate_one(task: tuple[int, dict, dict, int]) -> dict:
-    index, cfg_dict, empirical_dict, seed = task
-    cfg = Config(**cfg_dict)
-    empirical = EmpiricalMapStore(
-        rec_maps=empirical_dict.get("rec_maps", {}),
-        mut_maps=empirical_dict.get("mut_maps", {}),
-    )
+def simulate_one(task: tuple) -> dict:
+    index, cfg, empirical, seed = _parse_task(task)
     rng = rng_from_seed(seed)
     empirical_available = empirical.is_available(cfg.seq_len)
     sample_id = f"sim_{index:08d}"
@@ -55,12 +101,13 @@ def simulate_one(task: tuple[int, dict, dict, int]) -> dict:
         true_rec_pos, true_rec_rate, obs_rec_pos, obs_rec_rate, true_mut_pos, true_mut_rate, obs_mut_pos, obs_mut_rate, map_meta = maps
         rec_map = make_rate_map(true_rec_pos, true_rec_rate)
         mut_map = make_rate_map(true_mut_pos, true_mut_rate)
+        n_diploids = cfg.n_haplotypes // 2
         ts = msprime.sim_ancestry(
-            samples={"pop": cfg.n_haplotypes},
+            samples={"pop": n_diploids},
             demography=dem,
             sequence_length=cfg.seq_len,
             recombination_rate=rec_map,
-            ploidy=1,
+            ploidy=2,
             random_seed=int(rng.integers(1, 2**31 - 2)),
         )
         try:
@@ -93,7 +140,8 @@ def simulate_one(task: tuple[int, dict, dict, int]) -> dict:
     from .noise import noise_params_for_sample
 
     noise = noise_params_for_sample(rng, cfg, source)
-    G_noisy, missing = apply_genotype_noise(G, rng, noise["genotype_error"], noise["missing_rate"])
+    G_noisy, missing, noise_stats = apply_genotype_noise(G, positions, rng, noise)
+    noise.update(noise_stats)
 
     packed = pack_haplotypes(G_noisy, cfg.n_haplotypes)
     packed_missing = pack_haplotypes(missing, cfg.n_haplotypes)
@@ -108,6 +156,9 @@ def simulate_one(task: tuple[int, dict, dict, int]) -> dict:
         "noise_profile": noise.get("profile", "unknown"),
         "sequence_length": int(round(ts.sequence_length)),
         "n_haplotypes": cfg.n_haplotypes,
+        "n_diploid_individuals": cfg.n_haplotypes // 2,
+        "sample_ploidy": 2,
+        "phase_pairing": "diploid_individual_haplotypes",
         "n_variants": int(G_noisy.shape[0]),
         "num_trees": int(ts.num_trees),
         "num_sites": int(ts.num_sites),
@@ -116,6 +167,13 @@ def simulate_one(task: tuple[int, dict, dict, int]) -> dict:
         **dem_meta,
         **map_meta,
     }
+    meta["scenario_key"] = "|".join(
+        [
+            str(meta.get("demography_type", "unknown")),
+            str(meta.get("map_mode", meta.get("map_type", "unknown"))),
+            str(meta.get("noise_profile", "unknown")),
+        ]
+    )
 
     out = {
         "sample_id": sample_id,
@@ -143,8 +201,16 @@ def simulate_one(task: tuple[int, dict, dict, int]) -> dict:
     return out
 
 
-def simulate_one_with_retries(task: tuple[int, dict, dict, int]) -> dict:
-    cfg = Config(**task[1])
+def _task_with_seed(task: tuple, seed: int) -> tuple:
+    if len(task) == 2:
+        return (task[0], seed)
+    if len(task) == 4:
+        return (task[0], task[1], task[2], seed)
+    raise ValueError(f"Unsupported simulator task shape: {len(task)}")
+
+
+def simulate_one_with_retries(task: tuple) -> dict:
+    cfg = _get_worker_cfg(task[1] if len(task) == 4 else None)
     current = task
     last_error: Exception | None = None
     for attempt in range(cfg.max_retries):
@@ -152,5 +218,6 @@ def simulate_one_with_retries(task: tuple[int, dict, dict, int]) -> dict:
             return simulate_one(current)
         except Exception as exc:
             last_error = exc
-            current = (task[0], task[1], task[2], task[3] + 17 * (attempt + 1))
+            seed = int(current[1] if len(current) == 2 else current[3])
+            current = _task_with_seed(current, seed + 17 * (attempt + 1))
     raise RuntimeError(f"sample[{task[0]}] failed after {cfg.max_retries} attempts: {last_error}") from last_error
