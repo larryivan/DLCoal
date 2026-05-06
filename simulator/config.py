@@ -31,6 +31,12 @@ DEMO_IDS = {
     "ancient_recent_compound": 15,
     "oscillating_mild": 16,
     "zigzag_strong": 17,
+    "smooth_random_walk_stress": 18,
+    "recent_bottleneck_extreme": 19,
+    "founder_recovery_extreme": 20,
+    "rapid_recent_growth_extreme": 21,
+    "serial_founder_extreme": 22,
+    "ancient_recent_conflict": 23,
 }
 ID_TO_DEMO = {v: k for k, v in DEMO_IDS.items()}
 
@@ -41,7 +47,7 @@ class Config:
     out_dir: str = "./DLCoalSim-Out"
     seed: int = 12345
     force: bool = False
-    demography_mixture_version: str = "v0.2-rw35"
+    demography_mixture_version: str = "v0.3-rw35-stress"
 
     n_samples: int = 2000
     shard_size: int = 64
@@ -63,15 +69,21 @@ class Config:
     p_constant: float = 0.05
     p_near_constant: float = 0.05
     p_smooth_random_walk: float = 0.35
-    p_single_bottleneck: float = 0.08
-    p_recent_bottleneck: float = 0.12
-    p_recent_founder_recovery: float = 0.08
-    p_continuous_exponential_growth: float = 0.06
+    p_smooth_random_walk_stress: float = 0.02
+    p_single_bottleneck: float = 0.07
+    p_recent_bottleneck: float = 0.10
+    p_recent_bottleneck_extreme: float = 0.01
+    p_recent_founder_recovery: float = 0.07
+    p_founder_recovery_extreme: float = 0.01
+    p_continuous_exponential_growth: float = 0.05
+    p_rapid_recent_growth_extreme: float = 0.01
     p_continuous_exponential_decline: float = 0.03
-    p_three_epoch: float = 0.05
-    p_serial_founder: float = 0.04
+    p_three_epoch: float = 0.04
+    p_serial_founder: float = 0.03
+    p_serial_founder_extreme: float = 0.01
     p_ancient_event: float = 0.02
     p_ancient_recent_compound: float = 0.02
+    p_ancient_recent_conflict: float = 0.01
     p_oscillating_mild: float = 0.01
     p_zigzag_strong: float = 0.01
     p_expansion: float = 0.01
