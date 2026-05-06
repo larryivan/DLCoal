@@ -1,0 +1,91 @@
+# macOS / editor noise
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python caches / build outputs
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Python environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+*.conda
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+
+# Logs and local scratch
+*.log
+logs/
+tmp/
+temp/
+scratch/
+
+# Generated simulator datasets and shards
+DLCoalSim-*/
+DLCoalSim_Out/
+DLCoalSim-Out/
+outputs/
+datasets/
+data/
+shards/
+splits/
+manifest.json
+config.json
+
+# PyTorch / deep learning artifacts
+checkpoints/
+models/
+runs/
+wandb/
+lightning_logs/
+tensorboard/
+mlruns/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+
+# Large population-genetics intermediate files
+*.trees
+*.ts
+*.vcf
+*.vcf.gz
+*.bcf
+*.bed.gz
+*.bim
+*.fam
+*.pgen
+*.pvar
+*.psam
+
+# Raw/downloaded map sources and processing caches
+maps/**/raw/
+maps/**/vcf/
+maps/**/.cache/
+maps/**/script/__pycache__/
+
+# Keep canonical processed maps and docs trackable.
+!maps/**/output/
+!maps/**/output/**/*.bed
+!maps/**/*.md

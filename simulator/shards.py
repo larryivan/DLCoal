@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+import dataclasses
+import gzip
+import json
+import math
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+from .config import Config, split_names
+from .empirical_maps import EmpiricalMapStore
+from .sample import simulate_one_with_retries
+from .utils import resolve_workers, safe_json_dumps
+
+
+def concat_with_offsets(arrs: list[np.ndarray], dtype=None) -> tuple[np.ndarray, np.ndarray]:
+    offsets = [0]
+    total = 0
+    for a in arrs:
+        total += len(a)
+        offsets.append(total)
+    if total == 0:
+        data = np.array([], dtype=dtype or np.float32)
+    else:
+        data = np.concatenate(arrs).astype(dtype or arrs[0].dtype, copy=False)
+    return data, np.array(offsets, dtype=np.int64)
+
+
+def write_shard(samples: list[dict], out_path: Path, cfg: Config) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ids = np.array([s["sample_id"] for s in samples], dtype="U64")
+    source_ids = np.array([s["source_id"] for s in samples], dtype=np.int16)
+    demo_ids = np.array([s["demo_id"] for s in samples], dtype=np.int16)
+    y = np.stack([s["target_log10_ne"] for s in samples]).astype(np.float32)
+
+    positions, variant_offsets = concat_with_offsets([s["positions"] for s in samples], dtype=np.uint32)
+    packed_bytes = int(math.ceil(cfg.n_haplotypes / 8))
+    geno_list = [s["geno_packed"].reshape(-1, packed_bytes) for s in samples]
+    miss_list = [s["missing_packed"].reshape(-1, packed_bytes) for s in samples]
+    geno_n = sum(x.shape[0] for x in geno_list)
+    miss_n = sum(x.shape[0] for x in miss_list)
+    geno = np.concatenate(geno_list, axis=0).astype(np.uint8) if geno_n else np.zeros((0, packed_bytes), dtype=np.uint8)
+    missing = np.concatenate(miss_list, axis=0).astype(np.uint8) if miss_n else np.zeros((0, packed_bytes), dtype=np.uint8)
+
+    obs_rec_pos, obs_rec_pos_offsets = concat_with_offsets([s["obs_rec_pos"] for s in samples], dtype=np.float32)
+    obs_rec_rate, obs_rec_rate_offsets = concat_with_offsets([s["obs_rec_rate"] for s in samples], dtype=np.float32)
+    obs_mut_pos, obs_mut_pos_offsets = concat_with_offsets([s["obs_mut_pos"] for s in samples], dtype=np.float32)
+    obs_mut_rate, obs_mut_rate_offsets = concat_with_offsets([s["obs_mut_rate"] for s in samples], dtype=np.float32)
+
+    save_kwargs = dict(
+        sample_id=ids,
+        source_id=source_ids,
+        demography_id=demo_ids,
+        target_log10_ne=y,
+        variant_positions_bp=positions,
+        variant_offsets=variant_offsets,
+        genotype_packed=geno,
+        missing_packed=missing,
+        packed_hap_bytes=np.array([packed_bytes], dtype=np.int16),
+        n_haplotypes=np.array([cfg.n_haplotypes], dtype=np.int16),
+        sequence_length=np.array([cfg.seq_len], dtype=np.int64),
+        obs_rec_pos=obs_rec_pos,
+        obs_rec_pos_offsets=obs_rec_pos_offsets,
+        obs_rec_rate=obs_rec_rate,
+        obs_rec_rate_offsets=obs_rec_rate_offsets,
+        obs_mut_pos=obs_mut_pos,
+        obs_mut_pos_offsets=obs_mut_pos_offsets,
+        obs_mut_rate=obs_mut_rate,
+        obs_mut_rate_offsets=obs_mut_rate_offsets,
+    )
+    if cfg.include_truth:
+        true_rec_pos, true_rec_pos_offsets = concat_with_offsets([s["true_rec_pos"] for s in samples], dtype=np.float32)
+        true_rec_rate, true_rec_rate_offsets = concat_with_offsets([s["true_rec_rate"] for s in samples], dtype=np.float32)
+        true_mut_pos, true_mut_pos_offsets = concat_with_offsets([s["true_mut_pos"] for s in samples], dtype=np.float32)
+        true_mut_rate, true_mut_rate_offsets = concat_with_offsets([s["true_mut_rate"] for s in samples], dtype=np.float32)
+        save_kwargs.update(
+            true_rec_pos=true_rec_pos,
+            true_rec_pos_offsets=true_rec_pos_offsets,
+            true_rec_rate=true_rec_rate,
+            true_rec_rate_offsets=true_rec_rate_offsets,
+            true_mut_pos=true_mut_pos,
+            true_mut_pos_offsets=true_mut_pos_offsets,
+            true_mut_rate=true_mut_rate,
+            true_mut_rate_offsets=true_mut_rate_offsets,
+        )
+    if cfg.compression:
+        np.savez_compressed(out_path, **save_kwargs)
+    else:
+        np.savez(out_path, **save_kwargs)
+
+    meta_path = out_path.with_suffix(".jsonl.gz")
+    with gzip.open(meta_path, "wt", encoding="utf-8") as f:
+        for s in samples:
+            f.write(safe_json_dumps(s["metadata"]) + "\n")
+
+
+def n_for_split(cfg: Config, split: str) -> int:
+    if split == "train":
+        return cfg.n_train
+    if split.startswith("test"):
+        return cfg.n_test
+    return cfg.n_val
+
+
+def split_seed_base(cfg: Config, split: str) -> int:
+    return cfg.seed + 1_000_000 * (split_names(cfg).index(split) + 1)
+
+
+def _empirical_to_dict(empirical: EmpiricalMapStore) -> dict:
+    return {"rec_maps": empirical.rec_maps, "mut_maps": empirical.mut_maps}
+
+
+def generate_split(cfg: Config, split: str, empirical: EmpiricalMapStore) -> dict:
+    n = n_for_split(cfg, split)
+    split_dir = Path(cfg.out_dir) / "shards" / split
+    split_dir.mkdir(parents=True, exist_ok=True)
+    done = split_dir / "DONE.json"
+    if done.exists() and not cfg.force:
+        print(f"[skip] {split}: DONE exists ({done})")
+        return json.loads(done.read_text())
+    if cfg.force:
+        for f in split_dir.glob("*"):
+            if f.is_file():
+                f.unlink()
+
+    print(f"[generate] split={split} n={n} shard_size={cfg.shard_size}")
+    cfg_dict = dataclasses.asdict(cfg)
+    empirical_dict = _empirical_to_dict(empirical)
+    seeds = [split_seed_base(cfg, split) + i * 7919 for i in range(n)]
+    tasks = [(i, split, cfg_dict, empirical_dict, seeds[i]) for i in range(n)]
+
+    workers = resolve_workers(cfg.workers)
+    samples_buffer: list[dict] = []
+    shard_paths: list[str] = []
+    metadata_rows: list[dict] = []
+    source_counts: dict[str, int] = {}
+    demo_counts: dict[str, int] = {}
+
+    def handle_sample(sample: dict) -> None:
+        nonlocal samples_buffer
+        samples_buffer.append(sample)
+        meta = sample["metadata"]
+        source = meta.get("source_type", "unknown")
+        demo = meta.get("demography_type", "unknown")
+        source_counts[source] = source_counts.get(source, 0) + 1
+        demo_counts[demo] = demo_counts.get(demo, 0) + 1
+        metadata_rows.append(
+            {
+                "sample_id": meta["sample_id"],
+                "sample_index": meta.get("sample_index", 0),
+                "split": meta["split"],
+                "source_type": source,
+                "demography_type": demo,
+                "map_type": meta.get("map_type", ""),
+                "n_variants": meta.get("n_variants", 0),
+                "num_trees": meta.get("num_trees", 0),
+                "num_sites": meta.get("num_sites", 0),
+                "seed": meta.get("seed", 0),
+            }
+        )
+        if len(samples_buffer) >= cfg.shard_size:
+            shard_idx = len(shard_paths)
+            path = split_dir / f"{split}_{shard_idx:05d}.npz"
+            write_shard(samples_buffer, path, cfg)
+            shard_paths.append(str(path.relative_to(cfg.out_dir)))
+            samples_buffer = []
+
+    if workers > 1:
+        pending: dict[int, dict] = {}
+        next_to_write = 0
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(simulate_one_with_retries, t): t[0] for t in tasks}
+            for fut in tqdm(as_completed(futures), total=n, desc=f"simulate {split}"):
+                sample = fut.result()
+                idx = int(sample["metadata"]["sample_index"])
+                pending[idx] = sample
+                while next_to_write in pending:
+                    handle_sample(pending.pop(next_to_write))
+                    next_to_write += 1
+        if next_to_write != n:
+            missing = sorted(set(range(n)) - set(range(next_to_write)) - set(pending))
+            raise RuntimeError(f"{split}: missing samples after parallel simulation: {missing[:10]}")
+    else:
+        for t in tqdm(tasks, desc=f"simulate {split}"):
+            handle_sample(simulate_one_with_retries(t))
+
+    if samples_buffer:
+        shard_idx = len(shard_paths)
+        path = split_dir / f"{split}_{shard_idx:05d}.npz"
+        write_shard(samples_buffer, path, cfg)
+        shard_paths.append(str(path.relative_to(cfg.out_dir)))
+
+    if len(metadata_rows) != n:
+        raise RuntimeError(f"{split}: generated {len(metadata_rows)} samples, expected {n}")
+
+    split_manifest = {
+        "split": split,
+        "n_samples": len(metadata_rows),
+        "n_shards": len(shard_paths),
+        "shards": shard_paths,
+        "source_counts": source_counts,
+        "demography_counts": demo_counts,
+    }
+    done.write_text(json.dumps(split_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    pd.DataFrame(metadata_rows).to_csv(split_dir / f"{split}_samples.csv", index=False)
+    return split_manifest
