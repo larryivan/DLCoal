@@ -86,6 +86,17 @@ Not allowed as model input:
 - noise parameters
 - tree sequence or TMRCA truth
 - target Ne(t)
+
+## Tutorials
+
+Start with:
+
+1. `notebooks/00_quickstart.ipynb` - load a shard and inspect one sample.
+2. `notebooks/01_visualize_single_sample.ipynb` - visualize genotypes, maps, and target Ne(t).
+3. `notebooks/02_dataset_overview.ipynb` - inspect metadata and dataset composition.
+4. `notebooks/03_filter_by_metadata.ipynb` - build custom subsets from sample annotations.
+5. `notebooks/04_compute_basic_features.ipynb` - compute simple baseline window features from raw data.
+6. `notebooks/05_quality_check_preview.ipynb` - run quick metadata and shard sanity checks.
 """
 
 
@@ -190,6 +201,432 @@ class DLCoalSimShard:
 '''
 
 
+VIZ_PY = r'''
+"""Reusable visualization helpers for DLCoalSim tutorial notebooks."""
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+try:
+    from IPython.display import display
+except ImportError:  # pragma: no cover - only used outside notebooks
+    display = print
+
+try:
+    from .loader import DLCoalSimShard
+except ImportError:
+    from loader import DLCoalSimShard
+
+
+def plot_target_curve(sample, time_mids=None):
+    y = np.asarray(sample["target_log10_ne"], dtype=float)
+    if time_mids is None:
+        x = np.arange(len(y))
+        x_label = "Time bin"
+        log_x = False
+    else:
+        x = np.asarray(time_mids, dtype=float)[: len(y)]
+        x_label = "Generations ago"
+        log_x = True
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(x, y, marker="o", linewidth=1)
+    if log_x:
+        plt.xscale("log")
+    plt.xlabel(x_label)
+    plt.ylabel("log10 Ne")
+    plt.title(f"Target Ne(t): {sample.get('sample_id', '')}")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_genotype_heatmap(sample, max_variants=300, max_haplotypes=64):
+    G = np.asarray(sample["genotypes"])
+    if G.size == 0:
+        print("No variants in this sample.")
+        return
+
+    G_show = G[:max_variants, :max_haplotypes]
+    plt.figure(figsize=(8, 5))
+    plt.imshow(G_show, aspect="auto", interpolation="nearest")
+    plt.xlabel("Haplotypes")
+    plt.ylabel("Variants")
+    plt.title("Haplotype genotype matrix")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_variant_density(sample, n_windows=200):
+    pos = np.asarray(sample["positions_bp"])
+    seq_len = int(sample["sequence_length"])
+    if len(pos) == 0:
+        print("No variants in this sample.")
+        return
+
+    bins = np.linspace(0, seq_len, n_windows + 1)
+    counts, _ = np.histogram(pos, bins=bins)
+    centers = 0.5 * (bins[:-1] + bins[1:])
+
+    plt.figure(figsize=(8, 3))
+    plt.plot(centers, counts)
+    plt.xlabel("Position (bp)")
+    plt.ylabel("Variant count")
+    plt.title("Variant density")
+    plt.tight_layout()
+    plt.show()
+
+
+def _plot_piecewise_map(map_dict, title, ylabel):
+    pos = np.asarray(map_dict["position_bp"], dtype=float)
+    rate = np.asarray(map_dict["rate"], dtype=float)
+    if len(pos) < 2 or len(rate) == 0:
+        print(f"No map data for {title}.")
+        return
+
+    x = pos[:-1]
+    plt.figure(figsize=(8, 3))
+    plt.step(x, rate, where="post")
+    plt.xlabel("Position (bp)")
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_observed_maps(sample):
+    _plot_piecewise_map(
+        sample["observed_recombination"],
+        "Observed recombination map",
+        "Rate per bp per generation",
+    )
+    _plot_piecewise_map(
+        sample["observed_mutation"],
+        "Observed mutation map",
+        "Rate per bp per generation",
+    )
+
+
+def show_metadata_card(sample):
+    meta = sample.get("metadata", {})
+    keys = [
+        "sample_id",
+        "source_type",
+        "scenario_key",
+        "demography_type",
+        "map_mode",
+        "noise_profile",
+        "n_variants",
+        "variant_density_per_mb",
+        "num_trees",
+        "n_epochs",
+        "has_recent_event",
+        "has_ancient_event",
+        "min_Ne",
+        "max_Ne",
+        "Ne_ratio_max_min",
+        "event_severity",
+        "event_duration",
+        "genotype_error",
+        "missing_rate",
+        "phase_switch_pair_count",
+    ]
+    rows = [(k, meta.get(k, "")) for k in keys if k in meta]
+    display(pd.DataFrame(rows, columns=["field", "value"]))
+
+
+def plot_column_distribution(df, column):
+    counts = df[column].value_counts(dropna=False)
+    plt.figure(figsize=(8, 4))
+    counts.plot(kind="bar")
+    plt.xlabel(column)
+    plt.ylabel("Count")
+    plt.title(f"Distribution of {column}")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_numeric_distribution(df, column, bins=50):
+    plt.figure(figsize=(6, 4))
+    df[column].dropna().hist(bins=bins)
+    plt.xlabel(column)
+    plt.ylabel("Count")
+    plt.title(f"Distribution of {column}")
+    plt.tight_layout()
+    plt.show()
+
+
+def _as_shards(dataset_or_loader):
+    if hasattr(dataset_or_loader, "get"):
+        return [dataset_or_loader]
+    if isinstance(dataset_or_loader, (str, Path)):
+        root = Path(dataset_or_loader)
+        if root.is_file():
+            return [DLCoalSimShard(root)]
+        return [DLCoalSimShard(p) for p in sorted((root / "samples").glob("shard_*.npz"))]
+    return list(dataset_or_loader)
+
+
+def _sample_by_id(shards, sample_id):
+    target = str(sample_id)
+    for shard in shards:
+        ids = [str(x) for x in shard.data["sample_id"]]
+        if target in ids:
+            return shard.get(ids.index(target))
+    raise KeyError(f"sample_id not found in provided shards: {sample_id}")
+
+
+def plot_random_targets(dataset_or_loader, metadata, n=20, time_mids=None, random_state=0):
+    df = metadata.sample(min(n, len(metadata)), random_state=random_state)
+    shards = _as_shards(dataset_or_loader)
+
+    plt.figure(figsize=(7, 4))
+    for _, row in df.iterrows():
+        sample = _sample_by_id(shards, row["sample_id"])
+        y = np.asarray(sample["target_log10_ne"], dtype=float)
+        if time_mids is None:
+            x = np.arange(len(y))
+        else:
+            x = np.asarray(time_mids, dtype=float)[: len(y)]
+        plt.plot(x, y, alpha=0.45, linewidth=1)
+    if time_mids is not None:
+        plt.xscale("log")
+        plt.xlabel("Generations ago")
+    else:
+        plt.xlabel("Time bin")
+    plt.ylabel("log10 Ne")
+    plt.title(f"Random target curves (n={len(df)})")
+    plt.tight_layout()
+    plt.show()
+'''
+
+
+VALIDATE_DATASET_PY = r'''
+"""Quick DLCoalSim dataset validation checks."""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+try:
+    from .loader import DLCoalSimShard
+except ImportError:
+    from loader import DLCoalSimShard
+
+
+def _check_monotone(name, arr):
+    if len(arr) > 1 and np.any(np.diff(arr) < 0):
+        raise AssertionError(f"{name} positions are not monotone")
+
+
+def validate_dataset(data_dir):
+    data_dir = Path(data_dir)
+    meta_path = data_dir / "metadata" / "samples.csv"
+    manifest_path = data_dir / "manifest.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(meta_path)
+    if not manifest_path.exists():
+        raise FileNotFoundError(manifest_path)
+
+    df = pd.read_csv(meta_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert df["sample_id"].is_unique, "sample_id values must be unique"
+    assert df["n_variants"].ge(0).all(), "n_variants must be non-negative"
+    assert df["sequence_length"].gt(0).all(), "sequence_length must be positive"
+    for column in ["mean_obs_rec_rate", "mean_obs_mut_rate", "variant_density_per_mb"]:
+        if column in df:
+            assert np.isfinite(df[column]).all(), f"{column} contains non-finite values"
+
+    shards = sorted((data_dir / "samples").glob("shard_*.npz"))
+    assert shards, "no shard_*.npz files found"
+    seen = 0
+    for shard_path in shards:
+        shard = DLCoalSimShard(shard_path)
+        for i in range(len(shard)):
+            sample = shard.get(i, unpack=False)
+            assert np.isfinite(sample["target_log10_ne"]).all(), "target contains non-finite values"
+            assert sample["sequence_length"] > 0, "sample sequence_length must be positive"
+            _check_monotone("variant", sample["positions_bp"])
+            _check_monotone("observed recombination", sample["observed_recombination"]["position_bp"])
+            _check_monotone("observed mutation", sample["observed_mutation"]["position_bp"])
+            seen += 1
+
+    expected = int(manifest.get("samples", {}).get("n_samples", len(df)))
+    assert seen == expected == len(df), f"sample count mismatch: shards={seen}, metadata={len(df)}, manifest={expected}"
+    print(f"OK: {seen} samples validated in {data_dir}")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("data_dir", nargs="?", default=".", help="DLCoalSim dataset directory")
+    args = parser.parse_args(argv)
+    validate_dataset(args.data_dir)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+'''
+
+
+def _source_lines(text: str) -> list[str]:
+    return [line + "\n" for line in text.strip("\n").splitlines()]
+
+
+def _md(text: str) -> dict:
+    return {"cell_type": "markdown", "metadata": {}, "source": _source_lines(text)}
+
+
+def _code(text: str) -> dict:
+    return {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": _source_lines(text)}
+
+
+def _notebook(cells: list[dict]) -> dict:
+    return {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python", "pygments_lexer": "ipython3"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+
+
+COMMON_SETUP = r'''
+from pathlib import Path
+import json
+import sys
+
+DATA_DIR = Path("..").resolve()
+if not (DATA_DIR / "manifest.json").exists():
+    DATA_DIR = Path(".").resolve()
+if str(DATA_DIR) not in sys.path:
+    sys.path.insert(0, str(DATA_DIR))
+
+SAMPLES_DIR = DATA_DIR / "samples"
+META_PATH = DATA_DIR / "metadata" / "samples.csv"
+SHARD_PATH = sorted(SAMPLES_DIR.glob("shard_*.npz"))[0]
+CONFIG = json.loads((DATA_DIR / "config.json").read_text())
+TIME_MIDS = CONFIG.get("time_mids")
+'''
+
+
+def tutorial_notebooks() -> dict[str, dict]:
+    intro = """This notebook is part of the DLCoalSim tutorial suite.
+
+DLCoalSim stores minimally processed simulated observations rather than model-specific precomputed statistics. You are encouraged to compute your own features from haplotypes, variant positions, and observed maps."""
+
+    return {
+        "00_quickstart.ipynb": _notebook(
+            [
+                _md(f"# DLCoalSim Quickstart\n\n{intro}\n\nThis notebook shows how to load one shard, inspect one sample, and access haplotypes, variant positions, observed maps, target log10 Ne(t), and metadata."),
+                _code(COMMON_SETUP),
+                _code("import pandas as pd\n\nfrom scripts.loader import DLCoalSimShard"),
+                _code("df = pd.read_csv(META_PATH)\ndf.head()"),
+                _code("shard = DLCoalSimShard(SHARD_PATH)\nsample = shard.get(0)\n\nsample.keys()"),
+                _code(
+                    'print("sample_id:", sample["sample_id"])\n'
+                    'print("sequence_length:", sample["sequence_length"])\n'
+                    'print("positions:", sample["positions_bp"].shape)\n'
+                    'print("genotypes:", sample["genotypes"].shape)\n'
+                    'print("target:", sample["target_log10_ne"].shape)\n'
+                    'print("metadata keys:", list(sample["metadata"].keys())[:20])'
+                ),
+            ]
+        ),
+        "01_visualize_single_sample.ipynb": _notebook(
+            [
+                _md(f"# Visualize One Sample\n\n{intro}\n\nThis notebook visualizes the raw observations and target for one sample."),
+                _code(COMMON_SETUP),
+                _code(
+                    "import pandas as pd\n\n"
+                    "from scripts.loader import DLCoalSimShard\n"
+                    "from scripts.viz import (\n"
+                    "    plot_target_curve,\n"
+                    "    plot_genotype_heatmap,\n"
+                    "    plot_variant_density,\n"
+                    "    plot_observed_maps,\n"
+                    "    show_metadata_card,\n"
+                    ")"
+                ),
+                _code("df = pd.read_csv(META_PATH)\nshard = DLCoalSimShard(SHARD_PATH)\nsample = shard.get(0)\nsample['metadata']"),
+                _md("The target is a log-time bin average of log10 Ne, not a single midpoint sample."),
+                _code("plot_target_curve(sample, time_mids=TIME_MIDS)"),
+                _md("Rows are variant sites and columns are haplotypes. Adjacent haplotype columns are the two haplotypes of one diploid individual."),
+                _code("plot_genotype_heatmap(sample, max_variants=300, max_haplotypes=64)"),
+                _code("plot_variant_density(sample, n_windows=200)"),
+                _code("plot_observed_maps(sample)"),
+                _code("show_metadata_card(sample)"),
+            ]
+        ),
+        "02_dataset_overview.ipynb": _notebook(
+            [
+                _md(f"# Dataset Overview\n\n{intro}\n\nThis notebook reads metadata only for most plots, then samples a few target curves from shards."),
+                _code(COMMON_SETUP),
+                _code("import pandas as pd\n\nfrom scripts.viz import plot_column_distribution, plot_numeric_distribution, plot_random_targets"),
+                _code("df = pd.read_csv(META_PATH)\ndf.head()"),
+                _code("plot_column_distribution(df, 'source_type')"),
+                _code("plot_column_distribution(df, 'demography_type')"),
+                _code("plot_column_distribution(df, 'map_mode')"),
+                _code("plot_column_distribution(df, 'noise_profile')"),
+                _code("plot_numeric_distribution(df, 'n_variants', bins=50)"),
+                _code("plot_numeric_distribution(df, 'Ne_ratio_max_min', bins=50)"),
+                _code("plot_numeric_distribution(df, 'variant_density_per_mb', bins=50)"),
+                _code("plot_random_targets(DATA_DIR, df, n=20, time_mids=TIME_MIDS, random_state=0)"),
+            ]
+        ),
+        "03_filter_by_metadata.ipynb": _notebook(
+            [
+                _md(f"# Filter By Metadata\n\n{intro}\n\nThe simulator creates a fully annotated sample pool. Use metadata to create your own train/validation/test or stress subsets."),
+                _code(COMMON_SETUP),
+                _code("import pandas as pd\n\ndf = pd.read_csv(META_PATH)\ndf.head()"),
+                _code("recent = df[df['has_recent_event'] == True]\nrecent.head()"),
+                _code("clean = df[df['source_type'] == 'clean_constant_map']\nclean.head()"),
+                _code("strong = df[df['Ne_ratio_max_min'] > 20]\nstrong.head()"),
+                _code("empirical = df[df['map_mode'] == 'empirical_slice']\nempirical.head()"),
+                _code("high_quality = df[(df['variant_density_per_mb'] > 100) & (df['missing_rate'] < 0.01)]\nhigh_quality.head()"),
+                _code(
+                    "OUT = DATA_DIR / 'benchmarks' / 'tutorial_examples'\n"
+                    "OUT.mkdir(parents=True, exist_ok=True)\n"
+                    "recent['sample_id'].to_csv(OUT / 'recent_samples.txt', index=False, header=False)\n"
+                    "strong['sample_id'].to_csv(OUT / 'strong_demography_samples.txt', index=False, header=False)\n"
+                    "OUT"
+                ),
+            ]
+        ),
+        "04_compute_basic_features.ipynb": _notebook(
+            [
+                _md(f"# Compute Basic Features\n\n{intro}\n\nDLCoalSim-Core does not precompute SFS, LD, pi, or haplotype features. This notebook shows a baseline window feature recipe that you can replace."),
+                _code(COMMON_SETUP),
+                _code("import matplotlib.pyplot as plt\n\nfrom scripts.loader import DLCoalSimShard\nfrom scripts.features import basic_window_stats"),
+                _code("shard = DLCoalSimShard(SHARD_PATH)\nsample = shard.get(0)\n\nG = sample['genotypes']\npos = sample['positions_bp']\nseq_len = sample['sequence_length']\n\nX = basic_window_stats(pos, G, seq_len, n_windows=512)\nX.shape"),
+                _code("plt.figure(figsize=(8, 3))\nplt.plot(X[:, 0])\nplt.xlabel('Window')\nplt.ylabel('SNP density')\nplt.tight_layout()\nplt.show()"),
+                _code("plt.figure(figsize=(8, 3))\nplt.plot(X[:, 1])\nplt.xlabel('Window')\nplt.ylabel('Pi proxy')\nplt.tight_layout()\nplt.show()"),
+                _code("plt.figure(figsize=(8, 3))\nplt.plot(X[:, 2])\nplt.xlabel('Window')\nplt.ylabel('Singleton fraction')\nplt.tight_layout()\nplt.show()"),
+                _md("The output `X` is only a baseline recipe. For model development, build your own feature extractor from haplotypes, variant positions, and observed maps."),
+            ]
+        ),
+        "05_quality_check_preview.ipynb": _notebook(
+            [
+                _md(f"# Quality Check Preview\n\n{intro}\n\nUse this notebook for quick sanity checks before sharing or training on a generated dataset."),
+                _code(COMMON_SETUP),
+                _code("import numpy as np\nimport pandas as pd\n\nfrom scripts.validate_dataset import validate_dataset"),
+                _code("df = pd.read_csv(META_PATH)\ndf.describe(include='all')"),
+                _code("assert df['n_variants'].ge(0).all()\nassert df['sequence_length'].gt(0).all()\nassert np.isfinite(df['variant_density_per_mb']).all()\nassert np.isfinite(df['mean_obs_rec_rate']).all()\nassert np.isfinite(df['mean_obs_mut_rate']).all()\nprint('metadata checks passed')"),
+                _code("df[['source_type', 'demography_type', 'map_mode', 'noise_profile']].apply(lambda s: s.value_counts()).fillna(0)"),
+                _code("df[['n_variants', 'variant_density_per_mb', 'missing_rate', 'mean_obs_rec_rate', 'mean_obs_mut_rate', 'Ne_ratio_max_min']].hist(figsize=(12, 8), bins=40);"),
+                _code("validate_dataset(DATA_DIR)"),
+            ]
+        ),
+    }
+
+
 def write_dataset_files(cfg: Config, sample_manifest: dict) -> None:
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -215,5 +652,13 @@ def write_dataset_files(cfg: Config, sample_manifest: dict) -> None:
 
     scripts = out / "scripts"
     scripts.mkdir(exist_ok=True)
+    (scripts / "__init__.py").write_text("", encoding="utf-8")
     (scripts / "features.py").write_text(FEATURES_PY, encoding="utf-8")
     (scripts / "loader.py").write_text(LOADER_PY, encoding="utf-8")
+    (scripts / "viz.py").write_text(VIZ_PY, encoding="utf-8")
+    (scripts / "validate_dataset.py").write_text(VALIDATE_DATASET_PY, encoding="utf-8")
+
+    notebooks = out / "notebooks"
+    notebooks.mkdir(exist_ok=True)
+    for name, notebook in tutorial_notebooks().items():
+        (notebooks / name).write_text(json.dumps(notebook, indent=2, ensure_ascii=False), encoding="utf-8")
