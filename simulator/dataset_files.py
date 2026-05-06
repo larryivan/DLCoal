@@ -54,6 +54,9 @@ events, and mild/strong oscillating histories. Metadata includes summary fields
 such as `n_epochs`, `has_recent_event`, `has_ancient_event`, `min_Ne`, `max_Ne`,
 `Ne_ratio_max_min`, `recent_min_Ne`, `ancient_mean_Ne`, `event_severity`, and
 `event_duration` for filtering and benchmark recipes.
+Sample quality metadata includes `variant_density_per_mb`, explicit noise rates,
+phase switch counts, and observed map rate summaries (`mean/std/min/max`) for
+quick corpus filtering without reading the shard arrays.
 
 stdpopsim samples are optional anchors/stress samples. They are disabled by
 default (`p_stdpopsim_anchor=0`) and are included only when requested with

@@ -72,6 +72,23 @@ def _ensure_haplotype_count(G: np.ndarray, n_haplotypes: int) -> np.ndarray:
     return np.concatenate([G, pad], axis=1)
 
 
+def _rate_summary(prefix: str, rates: np.ndarray) -> dict:
+    arr = np.asarray(rates, dtype=np.float64)
+    if arr.size == 0:
+        return {
+            f"mean_{prefix}_rate": 0.0,
+            f"std_{prefix}_rate": 0.0,
+            f"{prefix}_rate_min": 0.0,
+            f"{prefix}_rate_max": 0.0,
+        }
+    return {
+        f"mean_{prefix}_rate": float(np.mean(arr)),
+        f"std_{prefix}_rate": float(np.std(arr)),
+        f"{prefix}_rate_min": float(np.min(arr)),
+        f"{prefix}_rate_max": float(np.max(arr)),
+    }
+
+
 def simulate_one(task: tuple) -> dict:
     index, cfg, empirical, seed = _parse_task(task)
     rng = rng_from_seed(seed)
@@ -160,12 +177,19 @@ def simulate_one(task: tuple) -> dict:
         "sample_ploidy": 2,
         "phase_pairing": "diploid_individual_haplotypes",
         "n_variants": int(G_noisy.shape[0]),
+        "variant_density_per_mb": float(G_noisy.shape[0] / max(1e-12, int(round(ts.sequence_length)) / 1_000_000.0)),
+        "genotype_error": float(noise.get("genotype_error", 0.0)),
+        "missing_rate": float(noise.get("missing_rate", 0.0)),
+        "phase_switch_pair_count": int(noise.get("phase_switch_pair_count", 0)),
+        "phaseable_pair_count": int(noise.get("phaseable_pair_count", 0)),
         "num_trees": int(ts.num_trees),
         "num_sites": int(ts.num_sites),
         "seed": int(seed),
         "noise": noise,
         **dem_meta,
         **map_meta,
+        **_rate_summary("obs_rec", obs_rec_rate),
+        **_rate_summary("obs_mut", obs_mut_rate),
     }
     meta["scenario_key"] = "|".join(
         [
