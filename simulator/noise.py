@@ -63,6 +63,19 @@ def apply_phase_switch_errors(
     return X, stats
 
 
+def _sample_flat_indices(rng: np.random.Generator, n: int, p: float) -> np.ndarray:
+    if n <= 0 or p <= 0:
+        return np.zeros(0, dtype=np.uint32)
+    if n > np.iinfo(np.uint32).max:
+        raise ValueError("flat genotype index exceeds uint32 range")
+    k = int(rng.binomial(int(n), float(np.clip(p, 0.0, 1.0))))
+    if k == 0:
+        return np.zeros(0, dtype=np.uint32)
+    idx = rng.choice(int(n), size=k, replace=False)
+    idx.sort()
+    return idx.astype(np.uint32)
+
+
 def apply_genotype_noise(
     G: np.ndarray,
     positions_bp: np.ndarray,
@@ -71,21 +84,20 @@ def apply_genotype_noise(
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     if G.size == 0:
         stats = {"phase_switch_count": 0, "phase_switch_pair_count": 0, "phaseable_pair_count": 0}
-        return G.astype(np.uint8), np.zeros_like(G, dtype=np.uint8), stats
+        return G.astype(np.uint8), np.zeros(0, dtype=np.uint32), stats
 
     ge = float(noise.get("genotype_error", 0.0))
     mr = float(noise.get("missing_rate", 0.0))
     phase_rate = float(noise.get("phase_switch_rate_per_bp", 0.0))
     X, stats = apply_phase_switch_errors(G, positions_bp, rng, phase_rate)
+    flat = X.reshape(-1)
     if ge > 0:
-        flip = rng.random(X.shape) < ge
-        X[flip] = 1 - X[flip]
-    missing = np.zeros_like(X, dtype=np.uint8)
-    if mr > 0:
-        miss = rng.random(X.shape) < mr
-        missing[miss] = 1
-        X[miss] = 0
-    return X, missing, stats
+        flip_idx = _sample_flat_indices(rng, flat.size, ge)
+        flat[flip_idx] = 1 - flat[flip_idx]
+    missing_flat_idx = _sample_flat_indices(rng, flat.size, mr)
+    if len(missing_flat_idx):
+        flat[missing_flat_idx] = 0
+    return X, missing_flat_idx, stats
 
 
 def pack_haplotypes(G: np.ndarray, n_haplotypes: int) -> np.ndarray:

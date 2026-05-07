@@ -89,13 +89,6 @@ def _rate_summary(prefix: str, rates: np.ndarray) -> dict:
     }
 
 
-def _sparse_missing_flat_indices(missing: np.ndarray) -> np.ndarray:
-    flat_idx = np.flatnonzero(missing)
-    if len(flat_idx) and flat_idx[-1] > np.iinfo(np.uint32).max:
-        raise ValueError("missing sparse index exceeds uint32 range")
-    return flat_idx.astype(np.uint32)
-
-
 def simulate_one(task: tuple) -> dict:
     index, cfg, empirical, seed = _parse_task(task)
     rng = rng_from_seed(seed)
@@ -164,11 +157,10 @@ def simulate_one(task: tuple) -> dict:
     from .noise import noise_params_for_sample
 
     noise = noise_params_for_sample(rng, cfg, source)
-    G_noisy, missing, noise_stats = apply_genotype_noise(G, positions, rng, noise)
+    G_noisy, missing_flat_idx, noise_stats = apply_genotype_noise(G, positions, rng, noise)
     noise.update(noise_stats)
 
     packed = pack_haplotypes(G_noisy, cfg.n_haplotypes)
-    missing_flat_idx = _sparse_missing_flat_indices(missing)
     positions_u32 = np.clip(np.rint(positions), 0, np.iinfo(np.uint32).max).astype(np.uint32)
 
     meta = {

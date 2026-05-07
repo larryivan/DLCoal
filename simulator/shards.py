@@ -4,6 +4,7 @@ import dataclasses
 import gzip
 import json
 import math
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -156,11 +157,21 @@ def _generate_shard(task: tuple[int, int, int, dict]) -> dict:
     source_counts: dict[str, int] = {}
     demo_counts: dict[str, int] = {}
     map_counts: dict[str, int] = {}
+    shard_t0 = time.perf_counter()
+    sample_time_sum = 0.0
+    max_sample_sec = 0.0
+    slowest_meta: dict = {}
 
     for index in range(start, start + count):
+        sample_t0 = time.perf_counter()
         sample = simulate_one_with_retries((index, _seed_for_index(cfg, index)))
+        sample_sec = time.perf_counter() - sample_t0
+        sample_time_sum += sample_sec
         samples.append(sample)
         meta = sample["metadata"]
+        if sample_sec > max_sample_sec:
+            max_sample_sec = sample_sec
+            slowest_meta = meta
         source = meta.get("source_type", "unknown")
         demo = meta.get("demography_type", "unknown")
         map_mode = meta.get("map_mode", meta.get("map_type", "unknown"))
@@ -172,12 +183,20 @@ def _generate_shard(task: tuple[int, int, int, dict]) -> dict:
 
     out_path = _shard_npz_path(Path(cfg.out_dir) / "samples", shard_idx)
     _atomic_write_shard(samples, out_path, cfg)
+    shard_sec = time.perf_counter() - shard_t0
     return {
         "shard_idx": int(shard_idx),
         "start": int(start),
         "n_samples": int(count),
         "shard_path": str(Path("samples") / out_path.name),
         "shard_bytes": int(_shard_file_bytes(out_path)),
+        "shard_sec": float(shard_sec),
+        "mean_sample_sec": float(sample_time_sum / max(1, count)),
+        "max_sample_sec": float(max_sample_sec),
+        "slowest_demography_type": str(slowest_meta.get("demography_type", "unknown")),
+        "slowest_source_type": str(slowest_meta.get("source_type", "unknown")),
+        "slowest_n_variants": int(slowest_meta.get("n_variants", 0)),
+        "slowest_max_Ne": float(slowest_meta.get("max_Ne", 0.0)),
         "metadata_rows": metadata_rows,
         "full_metadata": full_metadata,
         "source_counts": source_counts,
@@ -310,6 +329,11 @@ def generate_dataset(cfg: Config, empirical: EmpiricalMapStore) -> dict:
             {
                 "disk_GB": f"{completed_bytes / 1e9:.1f}",
                 "est_GB": f"{est_total_bytes / 1e9:.1f}",
+                "shard_s": f"{float(result.get('shard_sec', 0.0)):.0f}",
+                "mean_s": f"{float(result.get('mean_sample_sec', 0.0)):.1f}",
+                "max_s": f"{float(result.get('max_sample_sec', 0.0)):.1f}",
+                "slow": str(result.get("slowest_demography_type", ""))[:18],
+                "vars": int(result.get("slowest_n_variants", 0)),
             }
         )
 
