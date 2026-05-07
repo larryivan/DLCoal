@@ -40,11 +40,9 @@ def write_shard(samples: list[dict], out_path: Path, cfg: Config) -> None:
     positions, variant_offsets = concat_with_offsets([s["positions"] for s in samples], dtype=np.uint32)
     packed_bytes = int(math.ceil(cfg.n_haplotypes / 8))
     geno_list = [s["geno_packed"].reshape(-1, packed_bytes) for s in samples]
-    miss_list = [s["missing_packed"].reshape(-1, packed_bytes) for s in samples]
     geno_n = sum(x.shape[0] for x in geno_list)
-    miss_n = sum(x.shape[0] for x in miss_list)
     geno = np.concatenate(geno_list, axis=0).astype(np.uint8) if geno_n else np.zeros((0, packed_bytes), dtype=np.uint8)
-    missing = np.concatenate(miss_list, axis=0).astype(np.uint8) if miss_n else np.zeros((0, packed_bytes), dtype=np.uint8)
+    missing_flat_idx, missing_offsets = concat_with_offsets([s["missing_flat_idx"] for s in samples], dtype=np.uint32)
 
     obs_rec_pos, obs_rec_pos_offsets = concat_with_offsets([s["obs_rec_pos"] for s in samples], dtype=np.float32)
     obs_rec_rate, obs_rec_rate_offsets = concat_with_offsets([s["obs_rec_rate"] for s in samples], dtype=np.float32)
@@ -59,7 +57,9 @@ def write_shard(samples: list[dict], out_path: Path, cfg: Config) -> None:
         variant_positions_bp=positions,
         variant_offsets=variant_offsets,
         genotype_packed=geno,
-        missing_packed=missing,
+        missing_flat_idx=missing_flat_idx,
+        missing_offsets=missing_offsets,
+        missing_storage=np.array(["sparse_flat_index_uint32"], dtype="U32"),
         packed_hap_bytes=np.array([packed_bytes], dtype=np.int16),
         n_haplotypes=np.array([cfg.n_haplotypes], dtype=np.int16),
         sequence_length=np.array([s["metadata"]["sequence_length"] for s in samples], dtype=np.int64),
@@ -98,6 +98,94 @@ def write_shard(samples: list[dict], out_path: Path, cfg: Config) -> None:
             f.write(safe_json_dumps(s["metadata"]) + "\n")
 
 
+def _shard_npz_path(samples_dir: Path, shard_idx: int) -> Path:
+    return samples_dir / f"shard_{shard_idx:05d}.npz"
+
+
+def _tmp_npz_path(out_path: Path) -> Path:
+    return out_path.with_name(f"{out_path.stem}.tmp{out_path.suffix}")
+
+
+def _atomic_write_shard(samples: list[dict], out_path: Path, cfg: Config) -> None:
+    tmp_path = _tmp_npz_path(out_path)
+    tmp_meta = tmp_path.with_suffix(".jsonl.gz")
+    final_meta = out_path.with_suffix(".jsonl.gz")
+    for path in [tmp_path, tmp_meta]:
+        if path.exists():
+            path.unlink()
+    write_shard(samples, tmp_path, cfg)
+    tmp_path.replace(out_path)
+    tmp_meta.replace(final_meta)
+
+
+def _seed_for_index(cfg: Config, index: int) -> int:
+    return cfg.seed + int(index) * 7919
+
+
+def _shard_tasks(n_samples: int, shard_size: int) -> list[tuple[int, int, int]]:
+    tasks: list[tuple[int, int, int]] = []
+    for shard_idx, start in enumerate(range(0, n_samples, shard_size)):
+        count = min(shard_size, n_samples - start)
+        tasks.append((shard_idx, start, count))
+    return tasks
+
+
+def _count_key(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _merge_counts(dst: dict[str, int], src: dict[str, int]) -> None:
+    for key, value in src.items():
+        dst[key] = dst.get(key, 0) + int(value)
+
+
+def _shard_file_bytes(path: Path) -> int:
+    meta_path = path.with_suffix(".jsonl.gz")
+    total = path.stat().st_size
+    if meta_path.exists():
+        total += meta_path.stat().st_size
+    return total
+
+
+def _generate_shard(task: tuple[int, int, int, dict]) -> dict:
+    shard_idx, start, count, cfg_dict = task
+    cfg = Config(**cfg_dict)
+    samples: list[dict] = []
+    metadata_rows: list[dict] = []
+    full_metadata: list[dict] = []
+    source_counts: dict[str, int] = {}
+    demo_counts: dict[str, int] = {}
+    map_counts: dict[str, int] = {}
+
+    for index in range(start, start + count):
+        sample = simulate_one_with_retries((index, _seed_for_index(cfg, index)))
+        samples.append(sample)
+        meta = sample["metadata"]
+        source = meta.get("source_type", "unknown")
+        demo = meta.get("demography_type", "unknown")
+        map_mode = meta.get("map_mode", meta.get("map_type", "unknown"))
+        _count_key(source_counts, source)
+        _count_key(demo_counts, demo)
+        _count_key(map_counts, map_mode)
+        metadata_rows.append(_metadata_row(meta))
+        full_metadata.append(meta)
+
+    out_path = _shard_npz_path(Path(cfg.out_dir) / "samples", shard_idx)
+    _atomic_write_shard(samples, out_path, cfg)
+    return {
+        "shard_idx": int(shard_idx),
+        "start": int(start),
+        "n_samples": int(count),
+        "shard_path": str(Path("samples") / out_path.name),
+        "shard_bytes": int(_shard_file_bytes(out_path)),
+        "metadata_rows": metadata_rows,
+        "full_metadata": full_metadata,
+        "source_counts": source_counts,
+        "demography_counts": demo_counts,
+        "map_counts": map_counts,
+    }
+
+
 def _metadata_row(meta: dict) -> dict:
     rec_slice = meta.get("rec_slice", {})
     mut_slice = meta.get("mut_slice", {})
@@ -129,6 +217,8 @@ def _metadata_row(meta: dict) -> dict:
         "variant_density_per_mb": meta.get("variant_density_per_mb", 0.0),
         "genotype_error": meta.get("genotype_error", 0.0),
         "missing_rate": meta.get("missing_rate", 0.0),
+        "n_missing_genotypes": meta.get("n_missing_genotypes", 0),
+        "missing_storage": meta.get("missing_storage", ""),
         "phase_switch_pair_count": meta.get("phase_switch_pair_count", 0),
         "phaseable_pair_count": meta.get("phaseable_pair_count", 0),
         "mean_obs_rec_rate": meta.get("mean_obs_rec_rate", 0.0),
@@ -194,68 +284,70 @@ def generate_dataset(cfg: Config, empirical: EmpiricalMapStore) -> dict:
                     if f.is_file():
                         f.unlink()
 
-    print(f"[generate] samples n={n} shard_size={cfg.shard_size}")
-    cfg_dict = dataclasses.asdict(cfg)
-    seeds = [cfg.seed + i * 7919 for i in range(n)]
-    tasks = [(i, seeds[i]) for i in range(n)]
-
     workers = resolve_workers(cfg.workers)
-    samples_buffer: list[dict] = []
-    shard_paths: list[str] = []
+    shard_jobs = _shard_tasks(n, cfg.shard_size)
+    print(f"[generate] samples n={n} shard_size={cfg.shard_size} shards={len(shard_jobs)} workers={workers}")
+    cfg_dict = dataclasses.asdict(cfg)
+
+    shard_results: dict[int, dict] = {}
     metadata_rows: list[dict] = []
     full_metadata: list[dict] = []
     source_counts: dict[str, int] = {}
     demo_counts: dict[str, int] = {}
     map_counts: dict[str, int] = {}
+    completed_samples = 0
+    completed_bytes = 0
 
-    def handle_sample(sample: dict) -> None:
-        nonlocal samples_buffer
-        samples_buffer.append(sample)
-        meta = sample["metadata"]
-        source = meta.get("source_type", "unknown")
-        demo = meta.get("demography_type", "unknown")
-        map_mode = meta.get("map_mode", meta.get("map_type", "unknown"))
-        source_counts[source] = source_counts.get(source, 0) + 1
-        demo_counts[demo] = demo_counts.get(demo, 0) + 1
-        map_counts[map_mode] = map_counts.get(map_mode, 0) + 1
-        metadata_rows.append(_metadata_row(meta))
-        full_metadata.append(meta)
-        if len(samples_buffer) >= cfg.shard_size:
-            shard_idx = len(shard_paths)
-            path = samples_dir / f"shard_{shard_idx:05d}.npz"
-            write_shard(samples_buffer, path, cfg)
-            shard_paths.append(str(path.relative_to(cfg.out_dir)))
-            samples_buffer = []
+    def handle_shard_result(result: dict, progress: tqdm) -> None:
+        nonlocal completed_samples, completed_bytes
+        shard_results[int(result["shard_idx"])] = result
+        completed_samples += int(result["n_samples"])
+        completed_bytes += int(result["shard_bytes"])
+        avg_bytes = completed_bytes / max(1, completed_samples)
+        est_total_bytes = avg_bytes * n
+        progress.update(int(result["n_samples"]))
+        progress.set_postfix(
+            {
+                "disk_GB": f"{completed_bytes / 1e9:.1f}",
+                "est_GB": f"{est_total_bytes / 1e9:.1f}",
+            }
+        )
 
     if workers > 1:
-        pending: dict[int, dict] = {}
-        next_to_write = 0
         with ProcessPoolExecutor(max_workers=workers, initializer=init_worker, initargs=(cfg_dict,)) as ex:
-            futures = {ex.submit(simulate_one_with_retries, t): t[0] for t in tasks}
-            for fut in tqdm(as_completed(futures), total=n, desc="simulate samples"):
-                sample = fut.result()
-                idx = int(sample["metadata"]["sample_index"])
-                pending[idx] = sample
-                while next_to_write in pending:
-                    handle_sample(pending.pop(next_to_write))
-                    next_to_write += 1
-        if next_to_write != n:
-            raise RuntimeError(f"generated {next_to_write} samples, expected {n}")
+            futures = {
+                ex.submit(_generate_shard, (shard_idx, start, count, cfg_dict)): shard_idx
+                for shard_idx, start, count in shard_jobs
+            }
+            with tqdm(total=n, desc="simulate samples", unit="sample") as progress:
+                for fut in as_completed(futures):
+                    handle_shard_result(fut.result(), progress)
     else:
         init_worker(cfg_dict)
-        for t in tqdm(tasks, desc="simulate samples"):
-            handle_sample(simulate_one_with_retries(t))
+        with tqdm(total=n, desc="simulate samples", unit="sample") as progress:
+            for shard_idx, start, count in shard_jobs:
+                handle_shard_result(_generate_shard((shard_idx, start, count, cfg_dict)), progress)
 
-    if samples_buffer:
-        shard_idx = len(shard_paths)
-        path = samples_dir / f"shard_{shard_idx:05d}.npz"
-        write_shard(samples_buffer, path, cfg)
-        shard_paths.append(str(path.relative_to(cfg.out_dir)))
+    shard_paths: list[str] = []
+    for shard_idx in sorted(shard_results):
+        result = shard_results[shard_idx]
+        shard_paths.append(result["shard_path"])
+        metadata_rows.extend(result["metadata_rows"])
+        full_metadata.extend(result["full_metadata"])
+        _merge_counts(source_counts, result["source_counts"])
+        _merge_counts(demo_counts, result["demography_counts"])
+        _merge_counts(map_counts, result["map_counts"])
+    metadata_rows.sort(key=lambda row: int(row.get("sample_index", 0)))
+    full_metadata.sort(key=lambda meta: int(meta.get("sample_index", 0)))
 
     if len(metadata_rows) != n:
         raise RuntimeError(f"generated {len(metadata_rows)} samples, expected {n}")
 
     metadata_paths = _write_metadata(metadata_rows, full_metadata, out_dir)
+    avg_bytes_per_sample = completed_bytes / max(1, len(metadata_rows))
+    samples_gb = completed_bytes / 1e9
+    avg_mb_per_sample = avg_bytes_per_sample / 1e6
+    print(f"[disk] samples={samples_gb:.2f} GB avg={avg_mb_per_sample:.2f} MB/sample")
     manifest = {
         "n_samples": len(metadata_rows),
         "n_shards": len(shard_paths),
@@ -265,6 +357,11 @@ def generate_dataset(cfg: Config, empirical: EmpiricalMapStore) -> dict:
         "source_counts": source_counts,
         "demography_counts": demo_counts,
         "map_counts": map_counts,
+        "samples_bytes": int(completed_bytes),
+        "samples_gb": float(samples_gb),
+        "avg_bytes_per_sample": float(avg_bytes_per_sample),
+        "avg_mb_per_sample": float(avg_mb_per_sample),
+        "estimated_total_samples_gb": float((avg_bytes_per_sample * len(metadata_rows)) / 1e9),
     }
     done.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest

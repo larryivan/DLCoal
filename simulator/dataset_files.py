@@ -19,6 +19,7 @@ history inference from haplotype data.
 The dataset stores simulated observations, not model-specific feature engineering:
 
 - bit-packed haplotype genotypes
+- sparse missing-genotype coordinates
 - diploid individuals represented by adjacent haplotype columns
 - variant positions
 - observed recombination/mutation maps
@@ -36,6 +37,10 @@ not precomputed in the core dataset.
 - `metadata/samples.jsonl.gz`: full metadata for all samples
 - `metadata/samples.parquet`: optional summary parquet when the local environment supports it
 - `config.json` and `manifest.json`: generation config and dataset manifest
+
+Shard files are written with NumPy's lossless `np.savez_compressed` path by
+default. Missing genotypes are stored as sparse per-sample row-major indices
+(`missing_flat_idx`, `missing_offsets`) rather than as a dense missing matrix.
 
 Targets are log-time bin averages, not midpoint samples. This keeps short
 events such as recent bottlenecks visible in labels when they overlap a time bin.
@@ -55,8 +60,8 @@ such as `n_epochs`, `has_recent_event`, `has_ancient_event`, `min_Ne`, `max_Ne`,
 `Ne_ratio_max_min`, `recent_min_Ne`, `ancient_mean_Ne`, `event_severity`, and
 `event_duration` for filtering and benchmark recipes.
 Sample quality metadata includes `variant_density_per_mb`, explicit noise rates,
-phase switch counts, and observed map rate summaries (`mean/std/min/max`) for
-quick corpus filtering without reading the shard arrays.
+missing genotype counts, phase switch counts, and observed map rate summaries
+(`mean/std/min/max`) for quick corpus filtering without reading the shard arrays.
 
 stdpopsim samples are optional anchors/stress samples. They are disabled by
 default (`p_stdpopsim_anchor=0`) and are included only when requested with
@@ -170,12 +175,19 @@ class DLCoalSimShard:
         v0, v1 = self.data["variant_offsets"][i], self.data["variant_offsets"][i + 1]
         pos = self.data["variant_positions_bp"][v0:v1]
         packed = self.data["genotype_packed"][v0:v1]
-        missing = self.data["missing_packed"][v0:v1]
+        m0, m1 = self.data["missing_offsets"][i], self.data["missing_offsets"][i + 1]
+        missing_flat_idx = self.data["missing_flat_idx"][m0:m1].astype(np.int64, copy=False)
         if unpack:
             G = np.unpackbits(packed, axis=1, bitorder="little")[:, :self.n_haplotypes].astype(np.uint8)
-            M = np.unpackbits(missing, axis=1, bitorder="little")[:, :self.n_haplotypes].astype(np.uint8)
+            M = np.zeros((len(pos), self.n_haplotypes), dtype=np.uint8)
+            if len(missing_flat_idx):
+                M[missing_flat_idx // self.n_haplotypes, missing_flat_idx % self.n_haplotypes] = 1
         else:
-            G, M = packed, missing
+            G = packed
+            M = {
+                "storage": "sparse_flat_index_uint32",
+                "flat_idx": missing_flat_idx,
+            }
         seq = self.data["sequence_length"]
         seq_len = int(seq[i] if len(seq) > 1 else seq[0])
         sample = {
@@ -330,6 +342,7 @@ def show_metadata_card(sample):
         "event_duration",
         "genotype_error",
         "missing_rate",
+        "n_missing_genotypes",
         "phase_switch_pair_count",
     ]
     rows = [(k, meta.get(k, "")) for k in keys if k in meta]
@@ -455,6 +468,12 @@ def validate_dataset(data_dir):
             _check_monotone("variant", sample["positions_bp"])
             _check_monotone("observed recombination", sample["observed_recombination"]["position_bp"])
             _check_monotone("observed mutation", sample["observed_mutation"]["position_bp"])
+            missing = sample["missing_mask"]
+            mf = np.asarray(missing["flat_idx"], dtype=np.int64)
+            if len(mf):
+                assert int(mf.min()) >= 0, "missing flat index out of range"
+                assert int(mf.max()) < len(sample["positions_bp"]) * sample["n_haplotypes"], "missing flat index out of range"
+                assert np.all(np.diff(mf) >= 0), "missing flat indices must be sorted"
             seen += 1
 
     expected = int(manifest.get("samples", {}).get("n_samples", len(df)))
@@ -620,7 +639,7 @@ DLCoalSim stores minimally processed simulated observations rather than model-sp
                 _code("df = pd.read_csv(META_PATH)\ndf.describe(include='all')"),
                 _code("assert df['n_variants'].ge(0).all()\nassert df['sequence_length'].gt(0).all()\nassert np.isfinite(df['variant_density_per_mb']).all()\nassert np.isfinite(df['mean_obs_rec_rate']).all()\nassert np.isfinite(df['mean_obs_mut_rate']).all()\nprint('metadata checks passed')"),
                 _code("df[['source_type', 'demography_type', 'map_mode', 'noise_profile']].apply(lambda s: s.value_counts()).fillna(0)"),
-                _code("df[['n_variants', 'variant_density_per_mb', 'missing_rate', 'mean_obs_rec_rate', 'mean_obs_mut_rate', 'Ne_ratio_max_min']].hist(figsize=(12, 8), bins=40);"),
+                _code("df[['n_variants', 'variant_density_per_mb', 'missing_rate', 'n_missing_genotypes', 'mean_obs_rec_rate', 'mean_obs_mut_rate', 'Ne_ratio_max_min']].hist(figsize=(12, 8), bins=40);"),
                 _code("validate_dataset(DATA_DIR)"),
             ]
         ),

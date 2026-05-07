@@ -89,6 +89,13 @@ def _rate_summary(prefix: str, rates: np.ndarray) -> dict:
     }
 
 
+def _sparse_missing_flat_indices(missing: np.ndarray) -> np.ndarray:
+    flat_idx = np.flatnonzero(missing)
+    if len(flat_idx) and flat_idx[-1] > np.iinfo(np.uint32).max:
+        raise ValueError("missing sparse index exceeds uint32 range")
+    return flat_idx.astype(np.uint32)
+
+
 def simulate_one(task: tuple) -> dict:
     index, cfg, empirical, seed = _parse_task(task)
     rng = rng_from_seed(seed)
@@ -161,7 +168,7 @@ def simulate_one(task: tuple) -> dict:
     noise.update(noise_stats)
 
     packed = pack_haplotypes(G_noisy, cfg.n_haplotypes)
-    packed_missing = pack_haplotypes(missing, cfg.n_haplotypes)
+    missing_flat_idx = _sparse_missing_flat_indices(missing)
     positions_u32 = np.clip(np.rint(positions), 0, np.iinfo(np.uint32).max).astype(np.uint32)
 
     meta = {
@@ -180,6 +187,8 @@ def simulate_one(task: tuple) -> dict:
         "variant_density_per_mb": float(G_noisy.shape[0] / max(1e-12, int(round(ts.sequence_length)) / 1_000_000.0)),
         "genotype_error": float(noise.get("genotype_error", 0.0)),
         "missing_rate": float(noise.get("missing_rate", 0.0)),
+        "n_missing_genotypes": int(len(missing_flat_idx)),
+        "missing_storage": "sparse_flat_index_uint32",
         "phase_switch_pair_count": int(noise.get("phase_switch_pair_count", 0)),
         "phaseable_pair_count": int(noise.get("phaseable_pair_count", 0)),
         "num_trees": int(ts.num_trees),
@@ -205,7 +214,7 @@ def simulate_one(task: tuple) -> dict:
         "demo_id": DEMO_IDS.get(meta.get("demography_type", "stdpopsim"), 9),
         "positions": positions_u32,
         "geno_packed": packed.astype(np.uint8),
-        "missing_packed": packed_missing.astype(np.uint8),
+        "missing_flat_idx": missing_flat_idx,
         "obs_rec_pos": np.asarray(obs_rec_pos, dtype=np.float32),
         "obs_rec_rate": np.asarray(obs_rec_rate, dtype=np.float32),
         "obs_mut_pos": np.asarray(obs_mut_pos, dtype=np.float32),
