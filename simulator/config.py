@@ -37,6 +37,12 @@ DEMO_IDS = {
     "rapid_recent_growth_extreme": 21,
     "serial_founder_extreme": 22,
     "ancient_recent_conflict": 23,
+    "dense_random_walk": 24,
+    "dense_multiscale_random_walk": 25,
+    "dense_recent_wiggle": 26,
+    "dense_random_walk_stress": 27,
+    "classic_sawtooth": 28,
+    "empirical_human_ne_template": 29,
 }
 ID_TO_DEMO = {v: k for k, v in DEMO_IDS.items()}
 
@@ -47,7 +53,7 @@ class Config:
     out_dir: str = "./DLCoalSim-Out"
     seed: int = 12345
     force: bool = False
-    demography_mixture_version: str = "v0.3-rw35-stress"
+    demography_mixture_version: str = "v0.6-empirical-human-ne"
 
     n_samples: int = 2000
     shard_size: int = 64
@@ -66,29 +72,42 @@ class Config:
     p_empirical_slice: float = 0.10
     p_stdpopsim_anchor: float = 0.00
 
-    p_constant: float = 0.05
+    p_constant: float = 0.04
     p_near_constant: float = 0.05
-    p_smooth_random_walk: float = 0.35
+    p_smooth_random_walk: float = 0.15
+    p_dense_random_walk: float = 0.09
+    p_dense_multiscale_random_walk: float = 0.06
+    p_dense_recent_wiggle: float = 0.045
+    p_classic_sawtooth: float = 0.03
+    p_empirical_human_ne_template: float = 0.08
     p_smooth_random_walk_stress: float = 0.02
-    p_single_bottleneck: float = 0.07
-    p_recent_bottleneck: float = 0.10
+    p_dense_random_walk_stress: float = 0.015
+    p_single_bottleneck: float = 0.055
+    p_recent_bottleneck: float = 0.075
     p_recent_bottleneck_extreme: float = 0.01
-    p_recent_founder_recovery: float = 0.07
+    p_recent_founder_recovery: float = 0.05
     p_founder_recovery_extreme: float = 0.01
-    p_continuous_exponential_growth: float = 0.05
+    p_continuous_exponential_growth: float = 0.04
     p_rapid_recent_growth_extreme: float = 0.01
-    p_continuous_exponential_decline: float = 0.03
-    p_three_epoch: float = 0.04
-    p_serial_founder: float = 0.03
+    p_continuous_exponential_decline: float = 0.025
+    p_three_epoch: float = 0.035
+    p_serial_founder: float = 0.025
     p_serial_founder_extreme: float = 0.01
-    p_ancient_event: float = 0.02
+    p_ancient_event: float = 0.015
     p_ancient_recent_compound: float = 0.02
     p_ancient_recent_conflict: float = 0.01
     p_oscillating_mild: float = 0.01
     p_zigzag_strong: float = 0.01
-    p_expansion: float = 0.01
-    p_contraction: float = 0.01
-    p_zigzag: float = 0.01
+    p_expansion: float = 0.0025
+    p_contraction: float = 0.0025
+    p_zigzag: float = 0.005
+
+    empirical_ne_template_dir: str = "data/templates/human_ne"
+    empirical_ne_template_source_mix: str = "smcpp_1kg:0.25,phlash_unified:0.60,phlash_super:0.10,msmc2_example:0.04,msmc_im_example:0.01"
+    empirical_ne_template_log10_shift_sd: float = 0.12
+    empirical_ne_template_contrast_sd: float = 0.10
+    empirical_ne_template_time_warp_sd: float = 0.15
+    empirical_ne_template_bin_noise_sd: float = 0.025
 
     map_segments_min: int = 128
     map_segments_max: int = 512

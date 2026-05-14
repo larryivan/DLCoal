@@ -7,6 +7,7 @@ import msprime
 import numpy as np
 
 from .config import Config
+from .ne_templates import empirical_ne_templates_available, load_empirical_ne_templates
 from .utils import bin_average_log10_ne, loguniform, piecewise_eval, time_grid
 
 
@@ -18,7 +19,13 @@ DEMO_PROB_FIELDS = [
     ("constant", "p_constant"),
     ("near_constant", "p_near_constant"),
     ("smooth_random_walk", "p_smooth_random_walk"),
+    ("dense_random_walk", "p_dense_random_walk"),
+    ("dense_multiscale_random_walk", "p_dense_multiscale_random_walk"),
+    ("dense_recent_wiggle", "p_dense_recent_wiggle"),
+    ("classic_sawtooth", "p_classic_sawtooth"),
+    ("empirical_human_ne_template", "p_empirical_human_ne_template"),
     ("smooth_random_walk_stress", "p_smooth_random_walk_stress"),
+    ("dense_random_walk_stress", "p_dense_random_walk_stress"),
     ("single_bottleneck", "p_single_bottleneck"),
     ("recent_bottleneck", "p_recent_bottleneck"),
     ("recent_bottleneck_extreme", "p_recent_bottleneck_extreme"),
@@ -106,7 +113,7 @@ def _piecewise_exponential(
     older_ne: float,
     start: float,
     cfg: Config,
-    n_steps: int = 14,
+    n_steps: int = 20,
 ) -> tuple[list[float], list[float]]:
     t0 = max(float(cfg.min_time), 1.0)
     if start <= t0 * 1.05:
@@ -117,6 +124,38 @@ def _piecewise_exponential(
         frac = np.log(t / t0) / max(np.log(start / t0), 1e-12)
         log_ne = (1.0 - frac) * np.log(present_ne) + frac * np.log(older_ne)
         values.append(float(np.exp(log_ne)))
+    return breaks, values
+
+
+def _smoothed_array(arr: np.ndarray, win: int) -> np.ndarray:
+    if win <= 1:
+        return arr
+    kernel = np.ones(win) / win
+    sm = np.convolve(arr, kernel, mode="same")
+    half = win // 2
+    if half:
+        sm[:half] = arr[:half]
+        sm[-half:] = arr[-half:]
+    return sm
+
+
+def _bin_aligned_values(
+    log10_values: Sequence[float],
+    edges: np.ndarray,
+    idx: Sequence[int] | None = None,
+    lo: float = 50.0,
+    hi: float = 2_000_000.0,
+) -> tuple[list[float], list[float]]:
+    arr = np.asarray(log10_values, dtype=np.float64)
+    if idx is None:
+        use_idx = np.arange(arr.size, dtype=int)
+    else:
+        use_idx = np.unique(np.asarray(idx, dtype=int))
+        use_idx = use_idx[(0 <= use_idx) & (use_idx < arr.size)]
+    if use_idx.size == 0 or use_idx[0] != 0:
+        use_idx = np.insert(use_idx, 0, 0)
+    breaks = [float(edges[i]) for i in use_idx[1:]]
+    values = [float(np.clip(10 ** float(arr[i]), lo, hi)) for i in use_idx]
     return breaks, values
 
 
@@ -159,16 +198,15 @@ def _smooth_random_walk(rng: np.random.Generator, cfg: Config, edges: np.ndarray
         vals_log.append(logn)
     arr = np.array(vals_log)
     win = int(rng.integers(3, 7))
-    kernel = np.ones(win) / win
-    sm = np.convolve(arr, kernel, mode="same")
-    sm[: win // 2] = arr[: win // 2]
-    sm[-win // 2 :] = arr[-win // 2 :]
-    idx = np.linspace(0, cfg.time_bins - 1, num=min(8, cfg.time_bins), dtype=int)
-    breaks = [float(mids[i]) for i in idx[1:]]
-    values = [10 ** float(sm[i]) for i in idx]
+    sm = _smoothed_array(arr, win)
+    knot_count = min(cfg.time_bins, max(12, int(round(cfg.time_bins * rng.uniform(0.35, 0.55)))))
+    idx = np.linspace(0, cfg.time_bins - 1, num=knot_count, dtype=int)
+    breaks, values = _bin_aligned_values(sm, edges, idx)
     return breaks, values, {
         "random_walk_step_sd": float(step_sd),
         "smoothing_window": int(win),
+        "knot_count": int(len(values)),
+        "bin_aligned_demography": True,
         "has_recent_event": False,
         "has_ancient_event": False,
     }
@@ -189,22 +227,126 @@ def _smooth_random_walk_stress(rng: np.random.Generator, cfg: Config, edges: np.
         vals_log.append(logn)
     arr = np.array(vals_log)
     win = int(rng.integers(1, 4))
-    if win > 1:
-        kernel = np.ones(win) / win
-        sm = np.convolve(arr, kernel, mode="same")
-        sm[: win // 2] = arr[: win // 2]
-        sm[-win // 2 :] = arr[-win // 2 :]
-    else:
-        sm = arr
-    idx = np.linspace(0, cfg.time_bins - 1, num=min(14, cfg.time_bins), dtype=int)
-    breaks = [float(mids[i]) for i in idx[1:]]
-    values = [float(np.clip(10 ** float(sm[i]), 100.0, 2_000_000.0)) for i in idx]
+    sm = _smoothed_array(arr, win)
+    knot_count = min(cfg.time_bins, max(16, int(round(cfg.time_bins * rng.uniform(0.55, 0.85)))))
+    idx = np.linspace(0, cfg.time_bins - 1, num=knot_count, dtype=int)
+    breaks, values = _bin_aligned_values(sm, edges, idx, lo=100.0)
     return breaks, values, {
         "stress_scenario": True,
         "stress_type": "smooth_random_walk_stress",
         "random_walk_step_sd": float(step_sd),
         "random_walk_jump_prob": float(jump_prob),
         "smoothing_window": int(win),
+        "knot_count": int(len(values)),
+        "bin_aligned_demography": True,
+        "has_recent_event": False,
+        "has_ancient_event": False,
+    }
+
+
+def _dense_random_walk(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
+    logn = rng.uniform(3.5, 5.25)
+    anchor = logn
+    vals_log = [logn]
+    step_sd = rng.uniform(0.035, 0.09)
+    mean_reversion = rng.uniform(0.03, 0.08)
+    for _ in range(1, cfg.time_bins):
+        step = rng.normal(0.0, step_sd) - mean_reversion * (logn - anchor)
+        logn = float(np.clip(logn + step, 2.7, 5.85))
+        vals_log.append(logn)
+    arr = _smoothed_array(np.asarray(vals_log), int(rng.integers(1, 3)))
+    breaks, values = _bin_aligned_values(arr, edges)
+    return breaks, values, {
+        "dense_demography": True,
+        "dense_type": "correlated_random_walk",
+        "bin_aligned_demography": True,
+        "knot_count": int(len(values)),
+        "random_walk_step_sd": float(step_sd),
+        "mean_reversion": float(mean_reversion),
+        "has_recent_event": False,
+        "has_ancient_event": False,
+    }
+
+
+def _dense_multiscale_random_walk(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
+    t = np.arange(cfg.time_bins, dtype=np.float64)
+    coarse_k = int(rng.integers(5, 10))
+    coarse_x = np.linspace(0, cfg.time_bins - 1, coarse_k)
+    trend_sd = rng.uniform(0.12, 0.30)
+    coarse = [rng.uniform(3.4, 5.25)]
+    for _ in range(1, coarse_k):
+        coarse.append(float(np.clip(coarse[-1] + rng.normal(0.0, trend_sd), 2.7, 5.9)))
+    trend = np.interp(t, coarse_x, np.asarray(coarse))
+
+    wiggle_sd = rng.uniform(0.015, 0.055)
+    phi = rng.uniform(0.65, 0.90)
+    wiggle = np.zeros(cfg.time_bins, dtype=np.float64)
+    for i in range(1, cfg.time_bins):
+        wiggle[i] = phi * wiggle[i - 1] + rng.normal(0.0, wiggle_sd)
+
+    arr = np.clip(trend + wiggle, 2.7, 5.9)
+    breaks, values = _bin_aligned_values(arr, edges)
+    return breaks, values, {
+        "dense_demography": True,
+        "dense_type": "multiscale_random_walk",
+        "bin_aligned_demography": True,
+        "knot_count": int(len(values)),
+        "coarse_knot_count": int(coarse_k),
+        "trend_step_sd": float(trend_sd),
+        "wiggle_step_sd": float(wiggle_sd),
+        "wiggle_phi": float(phi),
+        "has_recent_event": False,
+        "has_ancient_event": False,
+    }
+
+
+def _dense_recent_wiggle(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
+    logn = rng.uniform(3.5, 5.25)
+    vals_log = [logn]
+    ancient_sd = rng.uniform(0.018, 0.055)
+    recent_boost = rng.uniform(0.08, 0.18)
+    recent_scale = rng.uniform(6.0, 16.0)
+    for i in range(1, cfg.time_bins):
+        step_sd = ancient_sd + recent_boost * np.exp(-i / recent_scale)
+        logn = float(np.clip(logn + rng.normal(0.0, step_sd), 2.7, 5.85))
+        vals_log.append(logn)
+    breaks, values = _bin_aligned_values(vals_log, edges)
+    return breaks, values, {
+        "dense_demography": True,
+        "dense_type": "recent_weighted_wiggle",
+        "bin_aligned_demography": True,
+        "knot_count": int(len(values)),
+        "ancient_step_sd": float(ancient_sd),
+        "recent_step_boost": float(recent_boost),
+        "recent_wiggle_scale_bins": float(recent_scale),
+        "has_recent_event": True,
+        "has_ancient_event": False,
+    }
+
+
+def _dense_random_walk_stress(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
+    log_min = np.log10(100.0)
+    log_max = np.log10(2_000_000.0)
+    logn = rng.uniform(2.0, 6.1)
+    vals_log = [logn]
+    step_sd = rng.uniform(0.12, 0.32)
+    jump_prob = rng.uniform(0.03, 0.08)
+    for _ in range(1, cfg.time_bins):
+        step = rng.normal(0.0, step_sd)
+        if rng.random() < jump_prob:
+            step += rng.normal(0.0, step_sd * rng.uniform(2.0, 4.0))
+        logn = float(np.clip(logn + step, log_min, log_max))
+        vals_log.append(logn)
+    breaks, values = _bin_aligned_values(vals_log, edges, lo=100.0)
+    return breaks, values, {
+        "stress_scenario": True,
+        "stress_type": "dense_random_walk_stress",
+        "dense_demography": True,
+        "dense_type": "stress_random_walk",
+        "bin_aligned_demography": True,
+        "knot_count": int(len(values)),
+        "random_walk_step_sd": float(step_sd),
+        "random_walk_jump_prob": float(jump_prob),
         "has_recent_event": False,
         "has_ancient_event": False,
     }
@@ -222,6 +364,100 @@ def _single_bottleneck(rng: np.random.Generator, cfg: Config, edges: np.ndarray,
         "event_time": float(start),
         "event_duration": float(end - start),
         "event_severity": float(severity),
+    }
+
+
+def _classic_sawtooth(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
+    x = (np.log(mids) - np.log(edges[0])) / max(np.log(edges[-1] / edges[0]), 1e-12)
+    cycles = int(rng.integers(2, 5))
+    phase = rng.uniform(-0.08, 0.08)
+    z = (cycles * x + phase) % 1.0
+    tri = 1.0 - 4.0 * np.abs(z - 0.5)
+
+    baseline = rng.uniform(4.05, 4.65)
+    amplitude = rng.uniform(0.38, 0.72)
+    trend = rng.uniform(-0.16, 0.16)
+    jitter_sd = rng.uniform(0.0, 0.025)
+    jitter = rng.normal(0.0, jitter_sd, size=cfg.time_bins)
+    arr = np.clip(baseline + amplitude * tri + trend * (x - 0.5) + jitter, 3.2, 5.65)
+    breaks, values = _bin_aligned_values(arr, edges, lo=1_000.0, hi=1_000_000.0)
+    return breaks, values, {
+        "classic_demography_model": True,
+        "dense_demography": True,
+        "dense_type": "classic_sawtooth",
+        "bin_aligned_demography": True,
+        "knot_count": int(len(values)),
+        "sawtooth_cycles": int(cycles),
+        "sawtooth_phase": float(phase),
+        "sawtooth_baseline_log10": float(baseline),
+        "sawtooth_amplitude_log10": float(amplitude),
+        "sawtooth_trend_log10": float(trend),
+        "sawtooth_jitter_sd": float(jitter_sd),
+        "has_recent_event": True,
+        "has_ancient_event": True,
+    }
+
+
+def _template_log10_bin_average(template, edges: np.ndarray, time_scale: float, n_grid: int = 8) -> np.ndarray:
+    t = np.maximum(np.asarray(template.generations_ago, dtype=np.float64), 1e-6)
+    log_t = np.log(t)
+    log_ne = np.log10(np.asarray(template.ne, dtype=np.float64))
+    out: list[float] = []
+    for left, right in zip(edges[:-1], edges[1:]):
+        grid = np.geomspace(float(left), float(right), n_grid) / max(time_scale, 1e-6)
+        vals = np.interp(np.log(np.maximum(grid, 1e-6)), log_t, log_ne, left=log_ne[0], right=log_ne[-1])
+        out.append(float(np.mean(vals)))
+    return np.asarray(out, dtype=np.float64)
+
+
+def _empirical_human_ne_template(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
+    store = load_empirical_ne_templates(cfg)
+    template = store.choose(rng, cfg)
+
+    time_scale = float(np.exp(rng.normal(0.0, cfg.empirical_ne_template_time_warp_sd)))
+    time_scale = float(np.clip(time_scale, 0.45, 2.25))
+    log_shift = float(rng.normal(0.0, cfg.empirical_ne_template_log10_shift_sd))
+    contrast = float(np.exp(rng.normal(0.0, cfg.empirical_ne_template_contrast_sd)))
+    contrast = float(np.clip(contrast, 0.70, 1.45))
+    bin_noise_sd = float(cfg.empirical_ne_template_bin_noise_sd)
+
+    raw = _template_log10_bin_average(template, edges, time_scale=time_scale)
+    center = float(np.median(raw))
+    arr = center + contrast * (raw - center) + log_shift
+    if bin_noise_sd > 0:
+        noise = rng.normal(0.0, bin_noise_sd, size=cfg.time_bins)
+        noise = _smoothed_array(noise, int(rng.integers(2, 5)))
+        arr = arr + noise
+    arr = np.clip(arr, np.log10(100.0), np.log10(2_000_000.0))
+
+    breaks, values = _bin_aligned_values(arr, edges, lo=100.0, hi=2_000_000.0)
+    recent = arr[mids <= 5_000.0]
+    ancient = arr[mids >= 50_000.0]
+    return breaks, values, {
+        "empirical_ne_template": True,
+        "target_quality": "empirical_inference_template_perturbed",
+        "template_source_key": template.source_key,
+        "template_method": template.method,
+        "template_population": template.population,
+        "template_path": template.path,
+        "template_time_unit": template.time_unit_note,
+        "template_generation_time_years": 29.0,
+        "template_curve_point_count": int(template.ne.size),
+        "template_time_min": float(np.min(template.generations_ago)),
+        "template_time_max": float(np.max(template.generations_ago)),
+        "template_min_Ne": float(np.min(template.ne)),
+        "template_max_Ne": float(np.max(template.ne)),
+        "template_time_scale": time_scale,
+        "template_log10_shift": log_shift,
+        "template_contrast_scale": contrast,
+        "template_bin_noise_sd": bin_noise_sd,
+        "dense_demography": True,
+        "dense_type": "empirical_human_ne_template",
+        "bin_aligned_demography": True,
+        "knot_count": int(len(values)),
+        "has_recent_event": bool(recent.size and np.ptp(recent) >= 0.15),
+        "has_ancient_event": bool(ancient.size and np.ptp(ancient) >= 0.15),
+        "event_severity": float(10 ** (np.min(arr) - np.max(arr))),
     }
 
 
@@ -324,7 +560,7 @@ def _rapid_recent_growth_extreme(rng: np.random.Generator, cfg: Config, edges: n
     factor = loguniform(rng, 50.0, 1_000.0)
     older_ne = loguniform(rng, 500, 20_000)
     present_ne = min(2_000_000.0, older_ne * factor)
-    breaks, values = _piecewise_exponential(present_ne, older_ne, start, cfg, n_steps=18)
+    breaks, values = _piecewise_exponential(present_ne, older_ne, start, cfg, n_steps=28)
     return breaks, values, {
         "stress_scenario": True,
         "stress_type": "rapid_recent_growth_extreme",
@@ -480,7 +716,7 @@ def _ancient_recent_conflict(rng: np.random.Generator, cfg: Config, edges: np.nd
 
 def _oscillating(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray, strong: bool) -> SamplerResult:
     t_max = float(edges[-1])
-    k = int(rng.integers(4, 9))
+    k = int(rng.integers(8, 15) if strong else rng.integers(10, 19))
     breaks = sorted(list(np.exp(rng.uniform(np.log(200), np.log(t_max * 0.8), size=k))))
     n = loguniform(rng, 3_000, 120_000)
     values = [n]
@@ -494,6 +730,7 @@ def _oscillating(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids:
         sign *= -1
     return breaks, values, {
         "oscillation_strength": "strong" if strong else "mild",
+        "knot_count": int(len(values)),
         "event_severity": float(min(values) / max(values)),
     }
 
@@ -546,7 +783,13 @@ DEMO_SAMPLERS: dict[str, DemoSampler] = {
     "constant": _constant,
     "near_constant": _near_constant,
     "smooth_random_walk": _smooth_random_walk,
+    "dense_random_walk": _dense_random_walk,
+    "dense_multiscale_random_walk": _dense_multiscale_random_walk,
+    "dense_recent_wiggle": _dense_recent_wiggle,
+    "classic_sawtooth": _classic_sawtooth,
+    "empirical_human_ne_template": _empirical_human_ne_template,
     "smooth_random_walk_stress": _smooth_random_walk_stress,
+    "dense_random_walk_stress": _dense_random_walk_stress,
     "single_bottleneck": _single_bottleneck,
     "recent_bottleneck": _recent_bottleneck,
     "recent_bottleneck_extreme": _recent_bottleneck_extreme,
@@ -574,6 +817,8 @@ def choose_demo_type(rng: np.random.Generator, cfg: Config) -> str:
     probs: list[float] = []
     for demo_type, field in DEMO_PROB_FIELDS:
         weight = float(getattr(cfg, field, 0.0))
+        if demo_type == "empirical_human_ne_template" and weight > 0 and not empirical_ne_templates_available(cfg):
+            continue
         if weight > 0:
             choices.append(demo_type)
             probs.append(weight)

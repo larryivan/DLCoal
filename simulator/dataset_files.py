@@ -51,11 +51,13 @@ each diploid individual after sampled switch points; this is recorded as
 `scenario_key` combines demography, map mode, and noise profile for convenient
 filtering without making fixed train/validation/test splits.
 
-Demography sampling uses a v0.2 registry of named samplers rather than one large
+Demography sampling uses a registry of named samplers rather than one large
 conditional block. It includes constant and near-constant controls, recent
 bottlenecks, recent founder recovery, continuous exponential growth/decline
 approximated by multiple epochs, serial founder events, ancient+recent compound
-events, and mild/strong oscillating histories. Metadata includes summary fields
+events, mild/strong oscillating histories, dense bin-aligned histories, classic
+sawtooth histories, and optional empirical human Ne templates inferred by tools
+such as SMC++, PHLaSH, and MSMC2. Metadata includes summary fields
 such as `n_epochs`, `has_recent_event`, `has_ancient_event`, `min_Ne`, `max_Ne`,
 `Ne_ratio_max_min`, `recent_min_Ne`, `ancient_mean_Ne`, `event_severity`, and
 `event_duration` for filtering and benchmark recipes.
