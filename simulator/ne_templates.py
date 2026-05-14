@@ -48,7 +48,7 @@ def empirical_ne_templates_available(cfg: Config) -> bool:
 
 
 def load_empirical_ne_templates(cfg: Config) -> EmpiricalNeTemplateStore:
-    root = Path(cfg.empirical_ne_template_dir).expanduser()
+    root = _resolve_template_dir(cfg.empirical_ne_template_dir)
     key = str(root.resolve()) if root.exists() else str(root)
     cached = _STORE_CACHE.get(key)
     if cached is not None:
@@ -111,6 +111,14 @@ def load_empirical_ne_templates(cfg: Config) -> EmpiricalNeTemplateStore:
     store = EmpiricalNeTemplateStore(templates=templates, source_counts=counts)
     _STORE_CACHE[key] = store
     return store
+
+
+def _resolve_template_dir(path: str) -> Path:
+    root = Path(path).expanduser()
+    if root.is_absolute() or root.exists():
+        return root
+    repo_relative = Path(__file__).resolve().parents[1] / root
+    return repo_relative if repo_relative.exists() else root
 
 
 def _parse_source_mix(text: str) -> dict[str, float]:

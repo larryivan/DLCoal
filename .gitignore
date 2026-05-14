@@ -48,6 +48,15 @@ sim_dat/
 outputs/
 datasets/
 data/
+!data/
+data/*
+!data/templates/
+data/templates/*
+!data/templates/README.md
+!data/templates/human_ne/
+!data/templates/human_ne/**
+data/**/.DS_Store
+data/**/.Rhistory
 shards/
 splits/
 manifest.json
