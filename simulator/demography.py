@@ -14,6 +14,9 @@ from .utils import bin_average_log10_ne, loguniform, piecewise_eval, time_grid
 SamplerResult = tuple[list[float], list[float], dict]
 DemoSampler = Callable[[np.random.Generator, Config, np.ndarray, np.ndarray], SamplerResult]
 
+STRESS_NE_CAP = 500_000.0
+ULTRA_STRESS_NE_CAP = 1_000_000.0
+
 
 DEMO_PROB_FIELDS = [
     ("constant", "p_constant"),
@@ -26,6 +29,7 @@ DEMO_PROB_FIELDS = [
     ("empirical_human_ne_template", "p_empirical_human_ne_template"),
     ("smooth_random_walk_stress", "p_smooth_random_walk_stress"),
     ("dense_random_walk_stress", "p_dense_random_walk_stress"),
+    ("ultra_stress", "p_ultra_stress"),
     ("single_bottleneck", "p_single_bottleneck"),
     ("recent_bottleneck", "p_recent_bottleneck"),
     ("recent_bottleneck_extreme", "p_recent_bottleneck_extreme"),
@@ -214,8 +218,8 @@ def _smooth_random_walk(rng: np.random.Generator, cfg: Config, edges: np.ndarray
 
 def _smooth_random_walk_stress(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
     log_min = np.log10(100.0)
-    log_max = np.log10(2_000_000.0)
-    logn = rng.uniform(2.0, 6.1)
+    log_max = np.log10(STRESS_NE_CAP)
+    logn = rng.uniform(2.2, 5.55)
     vals_log = [logn]
     step_sd = rng.uniform(0.22, 0.55)
     jump_prob = rng.uniform(0.05, 0.12)
@@ -230,10 +234,11 @@ def _smooth_random_walk_stress(rng: np.random.Generator, cfg: Config, edges: np.
     sm = _smoothed_array(arr, win)
     knot_count = min(cfg.time_bins, max(16, int(round(cfg.time_bins * rng.uniform(0.55, 0.85)))))
     idx = np.linspace(0, cfg.time_bins - 1, num=knot_count, dtype=int)
-    breaks, values = _bin_aligned_values(sm, edges, idx, lo=100.0)
+    breaks, values = _bin_aligned_values(sm, edges, idx, lo=100.0, hi=STRESS_NE_CAP)
     return breaks, values, {
         "stress_scenario": True,
         "stress_type": "smooth_random_walk_stress",
+        "stress_ne_cap": float(STRESS_NE_CAP),
         "random_walk_step_sd": float(step_sd),
         "random_walk_jump_prob": float(jump_prob),
         "smoothing_window": int(win),
@@ -326,8 +331,8 @@ def _dense_recent_wiggle(rng: np.random.Generator, cfg: Config, edges: np.ndarra
 
 def _dense_random_walk_stress(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
     log_min = np.log10(100.0)
-    log_max = np.log10(2_000_000.0)
-    logn = rng.uniform(2.0, 6.1)
+    log_max = np.log10(STRESS_NE_CAP)
+    logn = rng.uniform(2.2, 5.55)
     vals_log = [logn]
     step_sd = rng.uniform(0.12, 0.32)
     jump_prob = rng.uniform(0.03, 0.08)
@@ -337,10 +342,11 @@ def _dense_random_walk_stress(rng: np.random.Generator, cfg: Config, edges: np.n
             step += rng.normal(0.0, step_sd * rng.uniform(2.0, 4.0))
         logn = float(np.clip(logn + step, log_min, log_max))
         vals_log.append(logn)
-    breaks, values = _bin_aligned_values(vals_log, edges, lo=100.0)
+    breaks, values = _bin_aligned_values(vals_log, edges, lo=100.0, hi=STRESS_NE_CAP)
     return breaks, values, {
         "stress_scenario": True,
         "stress_type": "dense_random_walk_stress",
+        "stress_ne_cap": float(STRESS_NE_CAP),
         "dense_demography": True,
         "dense_type": "stress_random_walk",
         "bin_aligned_demography": True,
@@ -480,17 +486,18 @@ def _recent_bottleneck(rng: np.random.Generator, cfg: Config, edges: np.ndarray,
 
 def _recent_bottleneck_extreme(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
     t_max = float(edges[-1])
-    n0 = loguniform(rng, 10_000, 700_000)
+    n0 = loguniform(rng, 10_000, 300_000)
     start = loguniform(rng, 50, 3_000)
     duration = loguniform(rng, 10, 1_500)
     end = min(t_max * 0.6, start + duration)
     severity = loguniform(rng, 0.0005, 0.02)
     nbot = max(100.0, n0 * severity)
-    nanc = loguniform(rng, 1_000, 2_000_000)
+    nanc = loguniform(rng, 1_000, STRESS_NE_CAP)
     end = max(start + 1.0, end)
     return [start, end], [n0, nbot, nanc], {
         "stress_scenario": True,
         "stress_type": "recent_bottleneck_extreme",
+        "stress_ne_cap": float(STRESS_NE_CAP),
         "event_time": float(start),
         "event_duration": float(end - start),
         "event_severity": float(severity),
@@ -507,7 +514,7 @@ def _recent_founder_recovery(rng: np.random.Generator, cfg: Config, edges: np.nd
     recovery_factor = loguniform(rng, 5.0, 100.0)
     founder_ne = loguniform(rng, 200, 5_000)
     present_ne = min(1_000_000.0, founder_ne * recovery_factor)
-    ancient_ne = founder_ne / severity * loguniform(rng, 0.5, 2.0)
+    ancient_ne = min(1_000_000.0, founder_ne / severity * loguniform(rng, 0.5, 2.0))
     return [founder_time, max(founder_time + 1.0, founder_end)], [present_ne, founder_ne, ancient_ne], {
         "event_time": float(founder_time),
         "event_duration": float(founder_end - founder_time),
@@ -523,12 +530,13 @@ def _founder_recovery_extreme(rng: np.random.Generator, cfg: Config, edges: np.n
     duration = loguniform(rng, 10, 1_000)
     founder_end = min(t_max * 0.6, founder_time + duration)
     founder_ne = loguniform(rng, 100, 2_000)
-    recovery_factor = loguniform(rng, 50.0, 1_000.0)
-    present_ne = min(2_000_000.0, founder_ne * recovery_factor)
-    ancient_ne = loguniform(rng, 5_000, 2_000_000)
+    recovery_factor = loguniform(rng, 20.0, 250.0)
+    present_ne = min(STRESS_NE_CAP, founder_ne * recovery_factor)
+    ancient_ne = loguniform(rng, 5_000, STRESS_NE_CAP)
     return [founder_time, max(founder_time + 1.0, founder_end)], [present_ne, founder_ne, ancient_ne], {
         "stress_scenario": True,
         "stress_type": "founder_recovery_extreme",
+        "stress_ne_cap": float(STRESS_NE_CAP),
         "event_time": float(founder_time),
         "event_duration": float(founder_end - founder_time),
         "event_severity": float(founder_ne / max(present_ne, 1.0)),
@@ -557,13 +565,14 @@ def _continuous_exponential_growth(rng: np.random.Generator, cfg: Config, edges:
 
 def _rapid_recent_growth_extreme(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
     start = loguniform(rng, 50, 8_000)
-    factor = loguniform(rng, 50.0, 1_000.0)
+    factor = loguniform(rng, 20.0, 250.0)
     older_ne = loguniform(rng, 500, 20_000)
-    present_ne = min(2_000_000.0, older_ne * factor)
+    present_ne = min(STRESS_NE_CAP, older_ne * factor)
     breaks, values = _piecewise_exponential(present_ne, older_ne, start, cfg, n_steps=28)
     return breaks, values, {
         "stress_scenario": True,
         "stress_type": "rapid_recent_growth_extreme",
+        "stress_ne_cap": float(STRESS_NE_CAP),
         "growth_start": float(start),
         "growth_factor": float(factor),
         "growth_mode": "extreme_rapid_recent_growth",
@@ -634,7 +643,7 @@ def _serial_founder_extreme(rng: np.random.Generator, cfg: Config, edges: np.nda
     n_events = int(rng.integers(3, 6))
     base_times = np.geomspace(50.0, 70_000.0, n_events + 2)[1:-1]
     times = sorted((base_times * rng.lognormal(0.0, 0.35, size=n_events)).tolist())
-    n = loguniform(rng, 50_000, 2_000_000)
+    n = loguniform(rng, 50_000, STRESS_NE_CAP)
     values = [n]
     breaks: list[float] = []
     severities: list[float] = []
@@ -646,7 +655,7 @@ def _serial_founder_extreme(rng: np.random.Generator, cfg: Config, edges: np.nda
         severity = loguniform(rng, 0.001, 0.05)
         recovery = loguniform(rng, 5.0, 50.0)
         founder_ne = max(100.0, n * severity)
-        recovered_ne = min(2_000_000.0, founder_ne * recovery)
+        recovered_ne = min(STRESS_NE_CAP, founder_ne * recovery)
         breaks.extend([float(t), float(t + duration)])
         values.extend([founder_ne, recovered_ne])
         n = recovered_ne
@@ -655,6 +664,7 @@ def _serial_founder_extreme(rng: np.random.Generator, cfg: Config, edges: np.nda
     return breaks, values, {
         "stress_scenario": True,
         "stress_type": "serial_founder_extreme",
+        "stress_ne_cap": float(STRESS_NE_CAP),
         "n_founder_events": int(n_events),
         "event_severity": float(min(severities)),
         "event_duration": float(sum(durations)),
@@ -691,20 +701,177 @@ def _ancient_recent_conflict(rng: np.random.Generator, cfg: Config, edges: np.nd
     t_max = float(edges[-1])
     recent_t = loguniform(rng, 50, 5_000)
     ancient_t = loguniform(rng, 50_000, min(300_000.0, t_max * 0.9))
-    n0 = loguniform(rng, 5_000, 700_000)
+    n0 = loguniform(rng, 5_000, 300_000)
     if rng.random() < 0.5:
         recent_factor = loguniform(rng, 0.001, 0.05)
-        ancient_factor = loguniform(rng, 20.0, 300.0)
+        ancient_factor = loguniform(rng, 8.0, 100.0)
         conflict_mode = "recent_collapse_ancient_expansion"
     else:
-        recent_factor = loguniform(rng, 20.0, 300.0)
+        recent_factor = loguniform(rng, 8.0, 100.0)
         ancient_factor = loguniform(rng, 0.001, 0.05)
         conflict_mode = "recent_expansion_ancient_collapse"
-    n_recent = float(np.clip(n0 * recent_factor, 100, 2_000_000))
-    n_ancient = float(np.clip(n_recent * ancient_factor, 100, 2_000_000))
+    n_recent = float(np.clip(n0 * recent_factor, 100, STRESS_NE_CAP))
+    n_ancient = float(np.clip(n_recent * ancient_factor, 100, STRESS_NE_CAP))
     return [recent_t, ancient_t], [n0, n_recent, n_ancient], {
         "stress_scenario": True,
         "stress_type": "ancient_recent_conflict",
+        "stress_ne_cap": float(STRESS_NE_CAP),
+        "conflict_mode": conflict_mode,
+        "recent_event_time": float(recent_t),
+        "ancient_event_time": float(ancient_t),
+        "event_severity": float(min(n_recent, n0) / max(n_recent, n0)),
+        "has_recent_event": True,
+        "has_ancient_event": True,
+    }
+
+
+def _ultra_stress(rng: np.random.Generator, cfg: Config, edges: np.ndarray, mids: np.ndarray) -> SamplerResult:
+    cap = ULTRA_STRESS_NE_CAP
+    mode = str(
+        rng.choice(
+            [
+                "ultra_random_walk",
+                "ultra_recent_bottleneck",
+                "ultra_founder_recovery",
+                "ultra_rapid_recent_growth",
+                "ultra_serial_founder",
+                "ultra_ancient_recent_conflict",
+            ],
+            p=[0.24, 0.20, 0.18, 0.16, 0.12, 0.10],
+        )
+    )
+    common = {
+        "stress_scenario": True,
+        "ultra_stress_scenario": True,
+        "stress_type": mode,
+        "stress_ne_cap": float(cap),
+    }
+
+    if mode == "ultra_random_walk":
+        log_min = np.log10(100.0)
+        log_max = np.log10(cap)
+        logn = rng.uniform(2.1, 5.85)
+        step_sd = rng.uniform(0.18, 0.45)
+        jump_prob = rng.uniform(0.05, 0.10)
+        vals_log = [logn]
+        for _ in range(1, cfg.time_bins):
+            step = rng.normal(0.0, step_sd)
+            if rng.random() < jump_prob:
+                step += rng.normal(0.0, step_sd * rng.uniform(2.0, 4.0))
+            logn = float(np.clip(logn + step, log_min, log_max))
+            vals_log.append(logn)
+        arr = _smoothed_array(np.asarray(vals_log), int(rng.integers(1, 4)))
+        breaks, values = _bin_aligned_values(arr, edges, lo=100.0, hi=cap)
+        return breaks, values, {
+            **common,
+            "dense_demography": True,
+            "dense_type": mode,
+            "bin_aligned_demography": True,
+            "knot_count": int(len(values)),
+            "random_walk_step_sd": float(step_sd),
+            "random_walk_jump_prob": float(jump_prob),
+            "has_recent_event": False,
+            "has_ancient_event": False,
+        }
+
+    if mode == "ultra_recent_bottleneck":
+        t_max = float(edges[-1])
+        n0 = loguniform(rng, 20_000, 500_000)
+        start = loguniform(rng, 50, 3_000)
+        duration = loguniform(rng, 10, 1_500)
+        end = max(start + 1.0, min(t_max * 0.6, start + duration))
+        severity = loguniform(rng, 0.0005, 0.015)
+        nbot = max(100.0, n0 * severity)
+        nanc = loguniform(rng, 1_000, cap)
+        return [start, end], [n0, nbot, nanc], {
+            **common,
+            "event_time": float(start),
+            "event_duration": float(end - start),
+            "event_severity": float(severity),
+            "has_recent_event": True,
+        }
+
+    if mode == "ultra_founder_recovery":
+        t_max = float(edges[-1])
+        founder_time = loguniform(rng, 50, 3_000)
+        duration = loguniform(rng, 10, 1_000)
+        founder_end = max(founder_time + 1.0, min(t_max * 0.6, founder_time + duration))
+        founder_ne = loguniform(rng, 100, 2_000)
+        recovery_factor = loguniform(rng, 40.0, 500.0)
+        present_ne = min(cap, founder_ne * recovery_factor)
+        ancient_ne = loguniform(rng, 5_000, cap)
+        return [founder_time, founder_end], [present_ne, founder_ne, ancient_ne], {
+            **common,
+            "event_time": float(founder_time),
+            "event_duration": float(founder_end - founder_time),
+            "event_severity": float(founder_ne / max(present_ne, 1.0)),
+            "recovery_factor": float(recovery_factor),
+            "has_recent_event": True,
+        }
+
+    if mode == "ultra_rapid_recent_growth":
+        start = loguniform(rng, 50, 8_000)
+        factor = loguniform(rng, 40.0, 500.0)
+        older_ne = loguniform(rng, 500, 20_000)
+        present_ne = min(cap, older_ne * factor)
+        breaks, values = _piecewise_exponential(present_ne, older_ne, start, cfg, n_steps=28)
+        return breaks, values, {
+            **common,
+            "growth_start": float(start),
+            "growth_factor": float(factor),
+            "growth_mode": mode,
+            "continuous_approximation": "piecewise_exponential",
+            "has_recent_event": True,
+            "event_time": float(start),
+            "event_severity": float(min(present_ne, older_ne) / max(present_ne, older_ne)),
+        }
+
+    if mode == "ultra_serial_founder":
+        n_events = int(rng.integers(3, 6))
+        base_times = np.geomspace(50.0, 70_000.0, n_events + 2)[1:-1]
+        times = sorted((base_times * rng.lognormal(0.0, 0.35, size=n_events)).tolist())
+        n = loguniform(rng, 50_000, cap)
+        values = [n]
+        breaks: list[float] = []
+        severities: list[float] = []
+        durations: list[float] = []
+        for idx, t in enumerate(times):
+            next_t = times[idx + 1] if idx + 1 < len(times) else 80_000.0
+            max_duration = max(20.0, min(1_500.0, (next_t - t) * 0.25))
+            duration = loguniform(rng, 20, max_duration)
+            severity = loguniform(rng, 0.001, 0.05)
+            recovery = loguniform(rng, 5.0, 50.0)
+            founder_ne = max(100.0, n * severity)
+            recovered_ne = min(cap, founder_ne * recovery)
+            breaks.extend([float(t), float(t + duration)])
+            values.extend([founder_ne, recovered_ne])
+            n = recovered_ne
+            severities.append(severity)
+            durations.append(duration)
+        return breaks, values, {
+            **common,
+            "n_founder_events": int(n_events),
+            "event_severity": float(min(severities)),
+            "event_duration": float(sum(durations)),
+            "has_recent_event": bool(min(times) <= 5_000),
+        }
+
+    t_max = float(edges[-1])
+    recent_t = loguniform(rng, 50, 5_000)
+    ancient_t = loguniform(rng, 50_000, min(300_000.0, t_max * 0.9))
+    n0 = loguniform(rng, 5_000, 500_000)
+    if rng.random() < 0.5:
+        recent_factor = loguniform(rng, 0.001, 0.05)
+        ancient_factor = loguniform(rng, 20.0, 200.0)
+        conflict_mode = "recent_collapse_ancient_expansion"
+    else:
+        recent_factor = loguniform(rng, 20.0, 200.0)
+        ancient_factor = loguniform(rng, 0.001, 0.05)
+        conflict_mode = "recent_expansion_ancient_collapse"
+    n_recent = float(np.clip(n0 * recent_factor, 100, cap))
+    n_ancient = float(np.clip(n_recent * ancient_factor, 100, cap))
+    return [recent_t, ancient_t], [n0, n_recent, n_ancient], {
+        **common,
         "conflict_mode": conflict_mode,
         "recent_event_time": float(recent_t),
         "ancient_event_time": float(ancient_t),
@@ -790,6 +957,7 @@ DEMO_SAMPLERS: dict[str, DemoSampler] = {
     "empirical_human_ne_template": _empirical_human_ne_template,
     "smooth_random_walk_stress": _smooth_random_walk_stress,
     "dense_random_walk_stress": _dense_random_walk_stress,
+    "ultra_stress": _ultra_stress,
     "single_bottleneck": _single_bottleneck,
     "recent_bottleneck": _recent_bottleneck,
     "recent_bottleneck_extreme": _recent_bottleneck_extreme,

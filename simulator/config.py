@@ -43,6 +43,7 @@ DEMO_IDS = {
     "dense_random_walk_stress": 27,
     "classic_sawtooth": 28,
     "empirical_human_ne_template": 29,
+    "ultra_stress": 30,
 }
 ID_TO_DEMO = {v: k for k, v in DEMO_IDS.items()}
 
@@ -53,7 +54,7 @@ class Config:
     out_dir: str = "./DLCoalSim-Out"
     seed: int = 12345
     force: bool = False
-    demography_mixture_version: str = "v0.6-empirical-human-ne"
+    demography_mixture_version: str = "v0.7-capped-stress-human-ne"
 
     n_samples: int = 2000
     shard_size: int = 64
@@ -79,23 +80,24 @@ class Config:
     p_dense_multiscale_random_walk: float = 0.06
     p_dense_recent_wiggle: float = 0.045
     p_classic_sawtooth: float = 0.03
-    p_empirical_human_ne_template: float = 0.08
-    p_smooth_random_walk_stress: float = 0.02
-    p_dense_random_walk_stress: float = 0.015
-    p_single_bottleneck: float = 0.055
-    p_recent_bottleneck: float = 0.075
-    p_recent_bottleneck_extreme: float = 0.01
-    p_recent_founder_recovery: float = 0.05
-    p_founder_recovery_extreme: float = 0.01
-    p_continuous_exponential_growth: float = 0.04
-    p_rapid_recent_growth_extreme: float = 0.01
+    p_empirical_human_ne_template: float = 0.110
+    p_smooth_random_walk_stress: float = 0.008
+    p_dense_random_walk_stress: float = 0.004
+    p_ultra_stress: float = 0.005
+    p_single_bottleneck: float = 0.06
+    p_recent_bottleneck: float = 0.08
+    p_recent_bottleneck_extreme: float = 0.005
+    p_recent_founder_recovery: float = 0.055
+    p_founder_recovery_extreme: float = 0.004
+    p_continuous_exponential_growth: float = 0.045
+    p_rapid_recent_growth_extreme: float = 0.003
     p_continuous_exponential_decline: float = 0.025
     p_three_epoch: float = 0.035
     p_serial_founder: float = 0.025
-    p_serial_founder_extreme: float = 0.01
+    p_serial_founder_extreme: float = 0.003
     p_ancient_event: float = 0.015
     p_ancient_recent_compound: float = 0.02
-    p_ancient_recent_conflict: float = 0.01
+    p_ancient_recent_conflict: float = 0.003
     p_oscillating_mild: float = 0.01
     p_zigzag_strong: float = 0.01
     p_expansion: float = 0.0025
